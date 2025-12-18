@@ -1,5 +1,6 @@
 use futures::stream;
 use std::any::Any;
+use std::marker::PhantomData;
 use std::ops::ControlFlow;
 use std::pin::{Pin, pin};
 use std::sync::Mutex;
@@ -157,7 +158,7 @@ pub trait NewFactory<CTX, TOut> {
 }
 
 macro_rules! safe_select {
-    ( captures {$($cap: ident),*},   $($name: ident, $structname: ident = |$ctxname:ident| $body: expr  => |$ctxname2:ident, $valname: ident| $handler_body: expr ),*) => {
+    ( captures {$($cap: ident),*},   $($name: ident = |$ctxname:ident| $body: expr  => |$ctxname2:ident| $handler_body: expr ),*) => {
         {
 
             struct __SafeSelectCapture<$($cap),*> {
@@ -165,7 +166,7 @@ macro_rules! safe_select {
             }
 
             $(
-                struct $structname<R, TOut, TCap, TFun, TDecide> where
+                struct $name<R, TOut, TCap, TFun, TDecide> where
                     TFun: FnMut(&mut TCap) -> R,
                     R: Future,
                     TDecide: FnMut(&mut TCap, R::Output) -> ControlFlow<TOut>,
@@ -173,10 +174,10 @@ macro_rules! safe_select {
                     fun: TFun,
                     fut: Option<R>,
                     decide: TDecide,
-                    phantom_cap: *const TCap,
+                    phantom_cap: ::std::marker::PhantomData<TCap>,
                 }
 
-                impl<R, TOut, TCap, TFun,TDecide> $crate::NewFactory<TCap, TOut> for $structname<R, TOut, TCap, TFun, TDecide> where
+                impl<R, TOut, TCap, TFun,TDecide> $crate::NewFactory<TCap, TOut> for $name<R, TOut, TCap, TFun, TDecide> where
                     TFun: FnMut(&mut TCap) -> R,
                     R: Future<Output = TOut> + 'static,
                     TDecide: FnMut(&mut TCap, R::Output) -> ControlFlow<TOut>,
@@ -185,6 +186,7 @@ macro_rules! safe_select {
                         if self.fut.is_none() {
                             self.fut = Some((self.fun)(ctx));
                         }
+
                         let fut = self.fut.as_mut().unwrap();
                         match unsafe { ::std::pin::Pin::new_unchecked(fut) }.poll(cx) {
                             ::std::task::Poll::Ready(out) => {
@@ -214,7 +216,7 @@ macro_rules! safe_select {
                 type Item = TOut;
 
                 fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<Self::Item>> {
-                    let mut this = unsafe { self.get_unchecked_mut() };
+                    let this = unsafe { self.get_unchecked_mut() };
 
                     $(
                         if let ControlFlow::Break(val) = this.$name.do_poll(&mut this.__captures, cx) {
@@ -252,15 +254,15 @@ macro_rules! safe_select {
             assemble(
                 cap,
                     $(
-                    $structname {
+                    $name {
                         fun: unify(move |$ctxname|{
                                 $body
                             }, capptr),
                         fut: None,
-                        decide: unify2(move |$ctxname2, $valname|{
+                        decide: unify2(move |$ctxname2, $name|{
                                 $handler_body
                             }, capptr),
-                        phantom_cap: capptr,
+                        phantom_cap: ::std::marker::PhantomData,
                     },
                     )*
             )
@@ -291,24 +293,24 @@ mod tests {
                     captures {
                         tempcap, temp2
                     },
-                    pred1, st1 = |ctx| {
+                    pred1 = |ctx| {
                         println!("Tempcap:  {} : {}", ctx.tempcap, ctx.temp2);
                         ctx.tempcap += 2;
                         async move {
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             42u64
                         }
-                    } => |ctx, val| ControlFlow::Break(val),
-                    pred2, st2 = |ctx2| {
+                    } => |_ctx| ControlFlow::Break(pred1),
+                    pred2 = |ctx2| {
                             ctx2.tempcap += 10;
                             async move {
                                 tokio::time::sleep(Duration::from_millis(75)).await;
                                 43u64
                           }
-                    } => |ctx2, val|{
+                    } => |ctx2|{
                         //ctx2.tempcap += 1;
                         //compile_error!("USe trick to make ctx2 actually usable!")
-                        ControlFlow::Break(val)
+                        ControlFlow::Break(pred2)
                     }
                 ));
 
