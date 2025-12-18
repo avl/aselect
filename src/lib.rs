@@ -136,87 +136,134 @@ async fn select_expanded() {
 }
 
 pub use futures::Stream;
+pub trait Factory<CTX> {
+    type Output;
+    fn invoke(&mut self, ctx: &mut CTX) -> Self::Output;
+}
+
+impl<F,R, CTX> Factory<CTX> for F
+where
+    F: FnMut(&mut CTX) -> R,
+{
+    type Output = R;
+
+    fn invoke(&mut self, ctx: &mut CTX) -> Self::Output {
+        self(ctx)
+    }
+}
+
+pub trait NewFactory<CTX, TOut> {
+    fn do_poll(&mut self, ctx: &mut CTX, cx: &mut ::std::task::Context<'_>) -> ControlFlow<TOut>;
+}
 
 macro_rules! safe_select {
-    ( captures {$($cap: ident),*},   $($name: ident = |$ctxname:ident| $body: expr  => $handler_body: expr ),*) => {
+    ( captures {$($cap: ident),*},   $($name: ident, $structname: ident = |$ctxname:ident| $body: expr  => |$ctxname2:ident, $valname: ident| $handler_body: expr ),*) => {
         {
 
-
             struct __SafeSelectCapture<$($cap),*> {
-                $($cap: $cap)*
+                $($cap: $cap, )*
             }
 
-
-            pub trait Factory<CTX> {
-                type Output;
-                fn invoke(&mut self, ctx: &mut CTX) -> Self::Output;
-            }
-
-            impl<F,R, CTX> Factory<CTX> for F
-            where
-                F: FnMut(&mut CTX) -> R,
-            {
-                type Output = R;
-
-                fn invoke(&mut self, ctx: &mut CTX) -> Self::Output {
-                    self(ctx)
+            $(
+                struct $structname<R, TOut, TCap, TFun, TDecide> where
+                    TFun: FnMut(&mut TCap) -> R,
+                    R: Future,
+                    TDecide: FnMut(&mut TCap, R::Output) -> ControlFlow<TOut>,
+                {
+                    fun: TFun,
+                    fut: Option<R>,
+                    decide: TDecide,
+                    phantom_cap: *const TCap,
                 }
-            }
 
+                impl<R, TOut, TCap, TFun,TDecide> $crate::NewFactory<TCap, TOut> for $structname<R, TOut, TCap, TFun, TDecide> where
+                    TFun: FnMut(&mut TCap) -> R,
+                    R: Future<Output = TOut> + 'static,
+                    TDecide: FnMut(&mut TCap, R::Output) -> ControlFlow<TOut>,
+                {
+                    fn do_poll(&mut self, ctx: &mut TCap, cx: &mut ::std::task::Context<'_>) -> ControlFlow<TOut>  {
+                        if self.fut.is_none() {
+                            self.fut = Some((self.fun)(ctx));
+                        }
+                        let fut = self.fut.as_mut().unwrap();
+                        match unsafe { ::std::pin::Pin::new_unchecked(fut) }.poll(cx) {
+                            ::std::task::Poll::Ready(out) => {
+                                self.fut = None;
+                                let res = (self.decide)(ctx, out);
+                                res
+                            }
+                            ::std::task::Poll::Pending => {
+                                ControlFlow::Continue(())
+                            },
+                        }
+                    }
+                }
+            )*
 
-            pub struct __SafeSelectImpl<TOUT, TCap, $($name),*> where
-                $($name: Factory<TCap> ,)*
-                $($name::Output: Future<Output = TOUT>,)*
+            pub struct __SafeSelectImpl<TOut, TCap, $($name),*> where
+                $($name: $crate::NewFactory<TCap, TOut> ,)*
             {
                 __captures: TCap,
-                $($name: (Option<$name::Output>, $name),)*
+                $($name: $name,)*
+                phantom: ::std::marker::PhantomData<TOut>,
             }
 
-            impl<$($name),*  , TOUT, TCap> $crate::Stream for __SafeSelectImpl<TOUT, TCap,  $($name),*> where
-                $($name: Factory<TCap> ,)*
-                $($name::Output: Future<Output = TOUT>,)*
+            impl<TOut, TCap, $($name),*> $crate::Stream for __SafeSelectImpl<TOut, TCap,  $($name),*> where
+                $($name: $crate::NewFactory<TCap, TOut> ,)*
             {
-                type Item = TOUT;
+                type Item = TOut;
 
                 fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<Self::Item>> {
                     let mut this = unsafe { self.get_unchecked_mut() };
+
                     $(
-                    if this.$name.0.is_none() {
-                        this.$name.0 = Some(this.$name.1.invoke(&mut this.__captures));
-                    }
-                    )*
-                    $(
-                    match (unsafe { ::std::pin::Pin::new_unchecked(this.$name.0.as_mut().unwrap()) }).poll(cx) {
-                        ::std::task::Poll::Ready(val) => {
-                            this.$name.0 = None;
-                            match $handler_body(&mut this.__captures, val) {
-                                ::std::ops::ControlFlow::Break(val) => return ::std::task::Poll::Ready(Some(val)),
-                                ::std::ops::ControlFlow::Continue(()) => {}
-                            }
+                        if let ControlFlow::Break(val) = this.$name.do_poll(&mut this.__captures, cx) {
+                            return ::std::task::Poll::Ready(Some(val));
                         }
-                        _ => {}
-                    }
                     )*
                     ::std::task::Poll::Pending
                 }
             }
 
-            __SafeSelectImpl {
-                __captures: __SafeSelectCapture {
-                    $($cap: $cap, )*
-                },
-                $(
-                $name: (None,
-                        move |$ctxname: &mut __SafeSelectCapture<_>|{
-                            $body
-                            /*async move {
-                                tokio::time::sleep(Duration::from_millis(100)).await;
-                                42u64
-                            }*/
-
-                        }),
-                )*
+            fn assemble<TOut, TCap, $($name,)*> (thecap: TCap, $($name:$name ,)*) -> __SafeSelectImpl<TOut, TCap, $($name),*> where
+                $($name: $crate::NewFactory<TCap, TOut> ,)* {
+                    __SafeSelectImpl {
+                    __captures: thecap,
+                    phantom: ::std::marker::PhantomData,
+                    $(
+                    $name,
+                    )*
+                }
             }
+
+            fn unify<R, TCap, F: FnMut(&mut TCap) -> R>(func: F, cap: *const TCap) -> F {
+                _ = cap;
+                func
+            }
+            fn unify2<R, V, TCap, F: FnMut(&mut TCap, V) -> R>(func: F, cap: *const TCap) -> F {
+                _ = cap;
+                func
+            }
+
+            let cap = __SafeSelectCapture {
+                    $($cap: $cap, )*
+                };
+            let capptr: *const _ = &cap;
+            assemble(
+                cap,
+                    $(
+                    $structname {
+                        fun: unify(move |$ctxname|{
+                                $body
+                            }, capptr),
+                        fut: None,
+                        decide: unify2(move |$ctxname2, $valname|{
+                                $handler_body
+                            }, capptr),
+                        phantom_cap: capptr,
+                    },
+                    )*
+            )
         }
 
     }
@@ -239,27 +286,29 @@ mod tests {
             Duration::from_secs(1),
             async move {
                 let mut tempcap = 42u16;
+                let mut temp2 = 43u32;
                 let mut strm = pin!(safe_select!(
                     captures {
-                        tempcap
+                        tempcap, temp2
                     },
-                    pred1 = |ctx| {
-                        println!("Tempcap:  {}", ctx.tempcap);
+                    pred1, st1 = |ctx| {
+                        println!("Tempcap:  {} : {}", ctx.tempcap, ctx.temp2);
                         ctx.tempcap += 2;
                         async move {
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             42u64
                         }
                     } => |ctx, val| ControlFlow::Break(val),
-                    pred2 = |ctx2| {
+                    pred2, st2 = |ctx2| {
                             ctx2.tempcap += 10;
                             async move {
                                 tokio::time::sleep(Duration::from_millis(75)).await;
                                 43u64
                           }
                     } => |ctx2, val|{
-                        compile_error!("USe trick to make ctx2 actually usable!")
-                        ControlFlow::Continue(())
+                        //ctx2.tempcap += 1;
+                        //compile_error!("USe trick to make ctx2 actually usable!")
+                        ControlFlow::Break(val)
                     }
                 ));
 
