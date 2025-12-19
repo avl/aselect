@@ -19,31 +19,33 @@ async fn main() {
     let listen_factory = || TcpListener::bind("127.0.0.1:0");
 
     safe_select!(
-        compile_error!("Generate wrapper for state, containing a try_lock-method. clean up unsafety")
         capture(state),
         (
-            if (state.port.is_none()) {
+            if (state.get().unwrap().port.is_none()) {
                 listen_factory()
             },
             |acceptor| {
                 if let Ok(listener) = acceptor {
                     let listener: TcpListener = listener;
                     println!("New listner");
-                    state.port = Some(listener.local_addr().unwrap().port());
-                    state.server = Some(listener);
+                    state.get().unwrap().port = Some(listener.local_addr().unwrap().port());
+                    state.get().unwrap().server = Some(listener);
                 }
                 ControlFlow::<()>::Continue(())
             }
         )(
-            if (state.server.is_some()) {
+            if (state.get().unwrap().server.is_some()) {
 
-                let serv = state.server.as_mut().unwrap();
-                async move { serv.accept().await.map(|x| x.0) }
+                let mut guard = state.get().unwrap();
+                async move {
+                    let serv = guard.server.as_mut().unwrap();
+                    serv.accept().await.map(|x| x.0)
+                }
             },
             |res| {
                 match res {
                     Ok(conn) => {
-                        state.new_conn = Some(conn);
+                        state.get().unwrap().new_conn = Some(conn);
                         println!("Accepted");
                     }
                     Err(_) => {}
@@ -51,8 +53,8 @@ async fn main() {
                 ControlFlow::<()>::Continue(())
             }
         )(
-            if (state.port.is_some()) {
-                let port = state.port.unwrap();
+            if (state.get().unwrap().port.is_some()) {
+                let port = state.get().unwrap().port.unwrap();
                 async move {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     let mut conn = TcpStream::connect(format!("127.0.0.1:{}", port))
@@ -66,9 +68,10 @@ async fn main() {
                 ControlFlow::<()>::Continue(())
             }
         )(
-            if (state.new_conn.is_some()) {
-                let mut conn: TcpStream = state.new_conn.take().unwrap();
+            if (state.get().unwrap().new_conn.is_some()) {
+                let mut guard = state.get().unwrap();
                 async move {
+                    let mut conn: TcpStream = guard.new_conn.take().unwrap();
                     let mut buf = [0u8; 5];
                     conn.read_exact(&mut buf).await.unwrap();
                     String::from_utf8_lossy(&buf).to_string()
