@@ -1,6 +1,6 @@
 pub use futures::Stream;
 use std::cell::UnsafeCell;
-use std::marker::PhantomData;
+use std::marker::{PhantomData, PhantomPinned};
 use std::ops::{ControlFlow, Deref, DerefMut};
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
@@ -244,6 +244,7 @@ macro_rules! safe_select {
                 cap: TCap,
                 $($name: $name,)*
                 phantom: ::std::marker::PhantomData<(&'a TCap, TOut)>,
+                phantom_pinned: ::std::marker::PhantomPinned
             }
 
             #[allow(nonstandard_style)]
@@ -327,7 +328,18 @@ macro_rules! safe_select {
             }
 */
 
-            impl<'a, TOut, TCap:'a, $($name),*> Future for __SafeSelectImpl<'a, TOut, TCap, $($name),*> where
+            impl<'a, TOut, TCap:'a, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TOut, TCap, $($name),*> where
+                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            {
+                type Item = TOut;
+                fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<Self::Item>> {
+                    match self.poll_impl(cx) {
+                        ::std::task::Poll::Ready(val) => ::std::task::Poll::Ready(Some(val)),
+                        _ => std::task::Poll::Pending,
+                    }
+                }
+            }
+            impl<'a, TOut, TCap:'a, $($name),*> ::std::future::Future for __SafeSelectImpl<'a, TOut, TCap, $($name),*> where
                 $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
             {
                 type Output = TOut;
@@ -353,6 +365,7 @@ macro_rules! safe_select {
 
             __SafeSelectImpl{
                 cap,
+                    phantom_pinned: ::std::marker::PhantomPinned,
                 phantom: ::std::marker::PhantomData,
                     $(
                     $name: $name {

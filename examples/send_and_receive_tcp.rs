@@ -22,7 +22,7 @@ async fn main() {
     fn staticer<T:'static>(_s: &'static T) {
     }
 
-    safe_select!(
+    let mut temp = safe_select!(
         capture(state, server, new_conn),
         acceptor(
             {
@@ -43,6 +43,7 @@ async fn main() {
         )accept_result(
             {
                 let mut server = server.get_some()?;
+
                 async move { server.accept().await.map(|x| x.0) }
             },
             |accept_result| {
@@ -84,6 +85,8 @@ async fn main() {
                 None
             }
         )
-    )
-    .await;
+    );
+    let temp2 = temp;
+    temp2.await;
+
 }
