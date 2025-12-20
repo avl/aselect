@@ -10,42 +10,42 @@ async fn main() {
     #[derive(Default)]
     struct State {
         port: Option<u16>,
-        server: Option<TcpListener>,
-        new_conn: Option<TcpStream>,
     }
 
     let mut state = State::default();
 
     let listen_factory = || TcpListener::bind("127.0.0.1:0");
 
+    let server = None;
+    let new_conn = None;
+
     safe_select!(
-        capture(state),
+        capture(state, server, new_conn),
         (
-            if (state.get().unwrap().port.is_none()) {
+            {
+                if state.get()?.port.is_some() {
+                    return None;
+                };
                 listen_factory()
             },
             |acceptor| {
                 if let Ok(listener) = acceptor {
                     let listener: TcpListener = listener;
-                    println!("New listner");
-                    state.get().unwrap().port = Some(listener.local_addr().unwrap().port());
-                    state.get().unwrap().server = Some(listener);
+                    println!("New listener");
+                    state.get()?.port = Some(listener.local_addr().unwrap().port());
+                    *server.get()? = Some(listener);
                 }
                 ControlFlow::<()>::Continue(())
             }
         )(
-            if (state.get().unwrap().server.is_some()) {
-
-                let mut guard = state.get().unwrap();
-                async move {
-                    let serv = guard.server.as_mut().unwrap();
-                    serv.accept().await.map(|x| x.0)
-                }
+            {
+                let mut server = server.get_some()?;
+                async move { server.accept().await.map(|x| x.0) }
             },
-            |res| {
-                match res {
-                    Ok(conn) => {
-                        state.get().unwrap().new_conn = Some(conn);
+            |accept_result| {
+                match accept_result {
+                    Ok(connection) => {
+                        *new_conn.get()? = Some(connection);
                         println!("Accepted");
                     }
                     Err(_) => {}
@@ -53,8 +53,8 @@ async fn main() {
                 ControlFlow::<()>::Continue(())
             }
         )(
-            if (state.get().unwrap().port.is_some()) {
-                let port = state.get().unwrap().port.unwrap();
+            {
+                let port = state.get()?.port?;
                 async move {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     let mut conn = TcpStream::connect(format!("127.0.0.1:{}", port))
@@ -68,10 +68,9 @@ async fn main() {
                 ControlFlow::<()>::Continue(())
             }
         )(
-            if (state.get().unwrap().new_conn.is_some()) {
-                let mut guard = state.get().unwrap();
+            {
+                let mut conn: TcpStream = new_conn.take()?;
                 async move {
-                    let mut conn: TcpStream = guard.new_conn.take().unwrap();
                     let mut buf = [0u8; 5];
                     conn.read_exact(&mut buf).await.unwrap();
                     String::from_utf8_lossy(&buf).to_string()

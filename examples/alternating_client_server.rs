@@ -13,7 +13,7 @@ async fn main() {
     safe_select!(
         capture(state),
         (
-            if (state.server) {
+            if (state.get()?.server) {
                 println!("Server");
                 async move {
                     println!("Do server stuff");
@@ -22,12 +22,12 @@ async fn main() {
             },
             |accepted| {
                 println!("Server future completed");
-                state.server = false;
+                state.get()?.server = false;
                 ControlFlow::<()>::Continue(())
             }
         )
         (
-            if (!state.server) {
+            if (!state.get()?.server) {
                 println!("not server");
                 async move {
                     println!("Do client stuff");
@@ -35,7 +35,7 @@ async fn main() {
                 }
             },
             |connection_result| {
-                state.server = true;
+                state.get()?.server = true;
                 println!("Client future completed");
                 ControlFlow::<()>::Continue(())
             }
