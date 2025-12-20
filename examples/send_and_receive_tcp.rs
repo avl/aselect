@@ -21,7 +21,7 @@ async fn main() {
 
     safe_select!(
         capture(state, server, new_conn),
-        (
+        acceptor(
             {
                 if state.get()?.port.is_some() {
                     return None;
@@ -35,9 +35,9 @@ async fn main() {
                     state.get()?.port = Some(listener.local_addr().unwrap().port());
                     *server.get()? = Some(listener);
                 }
-                ControlFlow::<()>::Continue(())
+                None::<Option<()>>
             }
-        )(
+        )accept_result(
             {
                 let mut server = server.get_some()?;
                 async move { server.accept().await.map(|x| x.0) }
@@ -50,9 +50,9 @@ async fn main() {
                     }
                     Err(_) => {}
                 }
-                ControlFlow::<()>::Continue(())
+                None
             }
-        )(
+        )res2(
             {
                 let port = state.get()?.port?;
                 async move {
@@ -65,9 +65,9 @@ async fn main() {
             },
             |res2| {
                 println!("Send result: {:?}", res2);
-                ControlFlow::<()>::Continue(())
+                None
             }
-        )(
+        )res3(
             {
                 let mut conn: TcpStream = new_conn.take()?;
                 async move {
@@ -78,7 +78,7 @@ async fn main() {
             },
             |res3| {
                 println!("Server received: {:?}", res3);
-                ControlFlow::<()>::Continue(())
+                None
             }
         )
     )

@@ -25,8 +25,7 @@ async fn main() {
                 state.get()?.server = false;
                 ControlFlow::<()>::Continue(())
             }
-        )
-        (
+        )(
             if (!state.get()?.server) {
                 println!("not server");
                 async move {
@@ -39,15 +38,16 @@ async fn main() {
                 println!("Client future completed");
                 ControlFlow::<()>::Continue(())
             }
-        )
-        (
-            if (true) {async move {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }},
+        )(
+            if (true) {
+                async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+            },
             |timer| {
-            println!("Timer");
-            ControlFlow::<()>::Continue(())
-        }
+                println!("Timer");
+                ControlFlow::<()>::Continue(())
+            }
         )
     )
     .await;
