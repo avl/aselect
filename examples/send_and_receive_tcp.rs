@@ -16,8 +16,11 @@ async fn main() {
 
     let listen_factory = || TcpListener::bind("127.0.0.1:0");
 
-    let server = None;
-    let new_conn = None;
+    let mut server = None;
+    let mut new_conn = None;
+
+    fn staticer<T:'static>(_s: &'static T) {
+    }
 
     safe_select!(
         capture(state, server, new_conn),
