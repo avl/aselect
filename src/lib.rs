@@ -363,7 +363,7 @@ macro_rules! safe_select {
                         phantom_cap: ::std::marker::PhantomData,
                     },
                     )*
-            }
+            }.await
         }
 
 

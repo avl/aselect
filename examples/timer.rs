@@ -17,8 +17,8 @@ async fn main() {
     let mut smuggle = Arc::new(Mutex::new(None));
     let smuggle2 = smuggle.clone();
     {
-        let mut connection_attempts = UnsafeCell::new("hello".to_string());
 
+        let mut connection_attempts = UnsafeCell::new("hello".to_string());
         {
             safe_select!(
                 capture(connection_attempts),
@@ -39,8 +39,7 @@ async fn main() {
                         Some(Some(())) //TODO: Fix double option here, quite unsightly!
                     }
                 )
-            ).await
-                ;
+            );
 
              //println!("Smuggled: {:?}", **smuggle2.lock().unwrap().as_ref().unwrap());
         }
