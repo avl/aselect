@@ -280,7 +280,7 @@ macro_rules! safe_select {
                     loop {
                         $(
 
-                            if let Some(ready) = this.$name.do_poll(&this.cap, cx) {
+                            if let Some(ready) = this.$name.do_poll(unsafe{&*cap_ptr}, cx) {
                                 if let Some(val) = ready {
                                     return ::std::task::Poll::Ready(Some(val));
                                 }
@@ -326,21 +326,8 @@ macro_rules! safe_select {
                 func
             }
 
-
-            /*struct Wrapper<'a,TOut, TCap:'a, $($name),*> {
-                cap: TCap,
-                sel: Option<__SafeSelectImpl<'a,TOut, TCap, $($name),*>>
-            }*/
             let cap = $crate::ord_cap2!(__SafeSelectCapture, $($cap)*);
 
-            /*impl<'a, TOut, TCap, $($name),*> Wrapper<'a, TOut, TCap,  $($name),*> {
-                fn make_static<'b>(&mut self, sel: __SafeSelectImpl<'b, TOut, TCap, $($name),*>)  {
-                    unsafe {
-                        self.sel = Some(::std::mem::transmute(sel));
-                    }
-                }
-            }
-*/
 
             #[allow(nonstandard_style)]
             impl<'a, TOut, TCap:'a, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TOut, TCap, $($name),*> where
@@ -365,18 +352,6 @@ macro_rules! safe_select {
                 }
             }
 
-/*
-            impl<'a, TOut, TCap:'a, $($name),*> $crate::Stream for Wrapper<'a, TOut, TCap, $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
-            {
-                type Item = TOut;
-                fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<Self::Item>> {
-                    let cap = unsafe { &*(&self.cap as *const _ )};
-                    let sel = unsafe { self.map_unchecked_mut(|x|x.sel.as_mut().unwrap()) };
-                    sel.poll_next(cx, cap)
-                }
-            }*/
-
 
             let capptr: *const _ = &cap; //TODO: Remove, surely not needed any more
 
@@ -387,8 +362,9 @@ macro_rules! safe_select {
                     $(
                     $name: $name {
                         fun: unify(move |temp|{
+                                let ptr = temp as *const _;
                                 #[allow(unused)]
-                                let $capassign = temp;
+                                let $capassign = unsafe { &*ptr };
                                 Some($body)
                             }, capptr),
                         fut: None,
