@@ -26,30 +26,22 @@ where
 pub trait NewFactory<'a, CTX, TOut> {
     /// Returns true if future was ready
     /// If it was ready, it may have produced a value (ControlFlow::Break) or not (ControlFlow::Pending)
-    fn do_poll(
-        &mut self,
-        ctx: &'a CTX,
-        cx: &mut ::std::task::Context<'_>,
-    ) -> Option<Option<TOut>>;
+    fn do_poll(&mut self, ctx: &'a CTX, cx: &mut ::std::task::Context<'_>) -> Option<Option<TOut>>;
 }
 
 pub struct Capture<'a, T> {
     //TODO: Hide this from user
     #[doc(hidden)]
-    pub lock: UnsafeCell<bool>,
+    pub locks: &'a UnsafeCell<u64>,
     pub phantom: PhantomData<&'a T>,
     #[doc(hidden)]
     pub value: *const T,
     pub num: usize,
 }
 impl<'a, T> Capture<'a, T> {
-    pub fn new(
-        value: &mut T,
-        lock: UnsafeCell<bool>,
-        num: usize,
-    ) -> Self {
+    pub fn new(value: &'a mut T, locks: &'a UnsafeCell<u64>, num: usize) -> Self {
         Self {
-            lock,
+            locks,
             phantom: PhantomData,
             value,
             num,
@@ -58,26 +50,26 @@ impl<'a, T> Capture<'a, T> {
 }
 pub struct CaptureGuard<'a, T> {
     #[doc(hidden)]
-    pub lock: &'a UnsafeCell<bool>,
-    #[doc(hidden)]
     pub value: &'a mut T,
 }
 
-impl<'a, T> Debug for CaptureGuard<'a, T> where T: Debug {
+impl<'a, T> Debug for CaptureGuard<'a, T>
+where
+    T: Debug,
+{
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "CaptureGuard({:?})", self.value)
     }
 }
 
 impl<'a, T> Capture<'a, T> {
-    pub fn get(&'a self) -> Option<CaptureGuard<'a, T>> {
-        let lock = unsafe { &mut *self.lock.get() };
-        if *lock {
+    pub fn get(&self) -> Option<CaptureGuard<'a, T>> {
+        let locks = unsafe { &mut *self.locks.get() };
+        if *locks & (1<< self.num) != 0 {
             return None;
         }
-        *lock = true;
+        *locks |= (1<< self.num);
         Some(CaptureGuard {
-            lock: &self.lock,
             value: unsafe { &mut *(self.value as *mut _) },
         })
     }
@@ -85,35 +77,33 @@ impl<'a, T> Capture<'a, T> {
 
 impl<'a, T> Capture<'a, Option<T>> {
     pub fn get_some(&'a self) -> Option<CaptureGuard<'a, T>> {
-        let lock = unsafe { &mut *self.lock.get() };
-        if *lock {
+        let locks = unsafe { &mut *self.locks.get() };
+        if *locks & (1<< self.num) != 0 {
             return None;
         }
-        *lock = true;
+        *locks |= (1<< self.num);
+
         let value = unsafe { &mut *(self.value as *mut Option<T>) }.as_mut()?;
 
         Some(CaptureGuard {
-            lock: &self.lock,
             value,
         })
     }
     pub fn take(&'a self) -> Option<T> {
-        let lock = unsafe { &mut *self.lock.get() };
-        if *lock {
+        let locks = unsafe { &mut *self.locks.get() };
+        if *locks & (1<< self.num) != 0 {
             return None;
         }
-        unsafe { (*(self.value as * mut Option<T>)).take() }
+        unsafe { (*(self.value as *mut Option<T>)).take() }
     }
 }
 
 impl<'a, T> CaptureGuard<'a, T> {
     pub fn map<R>(self, map: impl FnOnce(&mut T) -> Option<&mut R>) -> Option<CaptureGuard<'a, R>> {
-        let lptr = self.lock as *const _;
         let vptr = self.value as *mut _;
         let new_value = map(unsafe { &mut *vptr })?;
         std::mem::forget(self);
         Some(CaptureGuard {
-            lock: unsafe { &*lptr },
             value: new_value,
         })
     }
@@ -148,17 +138,17 @@ macro_rules! ord_cap {
 
 #[macro_export]
 macro_rules! ord_cap2 {
-    ($typname: ident, $($cap:ident)*) => {
-        $crate::ord_cap2!($typname, inner 0, parsed $($cap)*)
+    ($typname: ident, $locks: ident, $($cap:ident)*) => {
+        $crate::ord_cap2!($typname, $locks, inner 0, parsed $($cap)*)
     };
-    ($typname: ident,inner $depth:expr, $(($cap0:ident, $count:expr))* parsed $cap:ident $($cap1:ident)*) => {
-        $crate::ord_cap2!($typname, inner ($depth + 1), $(($cap0, $count) )* ($cap, $depth) parsed $($cap1)* )
+    ($typname: ident, $locks: ident,inner $depth:expr, $(($cap0:ident, $count:expr))* parsed $cap:ident $($cap1:ident)*) => {
+        $crate::ord_cap2!($typname, $locks, inner ($depth + 1), $(($cap0, $count) )* ($cap, $depth) parsed $($cap1)* )
     };
 
-    ($typname: ident,inner $depth:expr, $(($cap:ident, $count:expr))* parsed) => {
+    ($typname: ident, $locks: ident,inner $depth:expr, $(($cap:ident, $count:expr))* parsed) => {
 
         $typname {
-            $($cap: $crate::Capture::new(&mut $cap, ::std::cell::UnsafeCell::new(false), ($count)), )*
+            $($cap: $crate::Capture::new(&mut $cap, &$locks, ($count)), )*
         }
 
     };
@@ -180,12 +170,8 @@ macro_rules! safe_select {
         safe_select!( innerest capture ( __SafeSelectCapture { $($cap,)* } ), ($($cap),*), $( ( $body, $name, $handler_body)  )* )
     };
     ( innerest capture ($capassign: pat), ($($cap: ident),*), $( (  $body: expr, $name: ident, $handler_body: expr)  )* ) => {
-        {
 
-            #[allow(nonstandard_style)]
-            struct __SafeSelectCapture<'a, $($cap),*> {
-                $($cap: $crate::Capture<'a, $cap>, )*
-            }
+        {
 
 
             $(
@@ -247,7 +233,7 @@ macro_rules! safe_select {
             )*
 
             #[allow(nonstandard_style)]
-            pub struct __SafeSelectImpl<'a, TOut, TCap, $($name),*> //where
+            pub struct __SafeSelectImpl<'a, TOut, TCap:'a, $($name),*> //where
                 //$($name: $crate::NewFactory<'a, TCap, TOut> ,)*
             {
                 cap: TCap,
@@ -308,16 +294,13 @@ macro_rules! safe_select {
                 }
             }
 
-            fn unify<'a, R: 'a, TCap:'a, F: FnMut(&'a TCap) -> R>(func: F, cap: *mut TCap) -> F {
-                _ = cap;
+            fn unify_fut<'a, R: 'a, TCap:'a, F: FnMut(& TCap) -> R>(func: F) -> F {
                 func
             }
-            fn unifyb<'a, R, TCap:'a, F: FnMut(&TCap) -> R>(func: F, cap: *mut TCap) -> F {
-                _ = cap;
+            fn unifyb<'a, R, TCap:'a, F: FnMut(&TCap) -> R>(func: F) -> F {
                 func
             }
-            fn unify2<'a, R, V, TCap:'a, F: FnMut(&TCap, V) -> R>(func: F, cap: *mut TCap) -> F {
-                _ = cap;
+            fn unify2<'a, R, V, TCap:'a, F: FnMut(&TCap, V) -> R>(func: F) -> F {
                 func
             }
 
@@ -326,7 +309,11 @@ macro_rules! safe_select {
                 cap: TCap,
                 sel: Option<__SafeSelectImpl<'a,TOut, TCap, $($name),*>>
             }*/
-            let mut cap = $crate::ord_cap2!(__SafeSelectCapture, $($cap)*);
+
+            #[allow(nonstandard_style)]
+            struct __SafeSelectCapture<'a, $($cap),*> {
+                $($cap: $crate::Capture<'a, $cap>, )*
+            }
 
 
             impl<'a, TOut, TCap:'a, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TOut, TCap, $($name),*> where
@@ -351,31 +338,35 @@ macro_rules! safe_select {
 
 
 
-            let capptr: *mut _ = &mut cap; //TODO: Remove, surely not needed any more
 
-            __SafeSelectImpl{
+            let locks = UnsafeCell::new(0u64);
+            let cap = {
+                $crate::ord_cap2!(__SafeSelectCapture, locks, $($cap)*)
+            };
+            __SafeSelectImpl {
                 cap,
                     phantom_pinned: ::std::marker::PhantomPinned,
-                phantom: ::std::marker::PhantomData,
+                    phantom: ::std::marker::PhantomData,
                     $(
                     $name: $name {
-                        fun: unify(move |temp|{
+                        fun: unify_fut(move |temp|{
                                 #[allow(unused)]
                                 let $capassign = temp;
                                 Some($body)
-                            }, capptr),
+                            }),
                         fut: None,
                         decide: unify2(move |temp, $name|{
                                 #[allow(unused)]
                                 let $capassign = temp;
                                 $handler_body($name)
-                            }, capptr),
+                            }),
                         phantom_cap: ::std::marker::PhantomData,
                     },
                     )*
             }
-
         }
+
+
 
     }
 
