@@ -1,5 +1,6 @@
 pub use futures::Stream;
 use std::cell::UnsafeCell;
+use std::fmt::{Debug, Formatter};
 use std::marker::{PhantomData, PhantomPinned};
 use std::ops::{ControlFlow, Deref, DerefMut};
 use std::pin::{Pin, pin};
@@ -62,12 +63,19 @@ pub struct CaptureGuard<'a, T> {
     pub value: &'a mut T,
 }
 
+impl<'a, T> Debug for CaptureGuard<'a, T> where T: Debug {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CaptureGuard({:?})", self.value)
+    }
+}
+
 impl<'a, T> Capture<'a, T> {
     pub fn get(&'a self) -> Option<CaptureGuard<'a, T>> {
         let lock = unsafe { &mut *self.lock.get() };
         if *lock {
             return None;
         }
+        *lock = true;
         Some(CaptureGuard {
             lock: &self.lock,
             value: unsafe { &mut *(self.value as *mut _) },
@@ -81,6 +89,7 @@ impl<'a, T> Capture<'a, Option<T>> {
         if *lock {
             return None;
         }
+        *lock = true;
         let value = unsafe { &mut *(self.value as *mut Option<T>) }.as_mut()?;
 
         Some(CaptureGuard {
@@ -299,15 +308,15 @@ macro_rules! safe_select {
                 }
             }
 
-            fn unify<'a, R: 'a, TCap:'a, F: FnMut(&'a TCap) -> R>(func: F, cap: *const TCap) -> F {
+            fn unify<'a, R: 'a, TCap:'a, F: FnMut(&'a TCap) -> R>(func: F, cap: *mut TCap) -> F {
                 _ = cap;
                 func
             }
-            fn unifyb<'a, R, TCap:'a, F: FnMut(&TCap) -> R>(func: F, cap: *const TCap) -> F {
+            fn unifyb<'a, R, TCap:'a, F: FnMut(&TCap) -> R>(func: F, cap: *mut TCap) -> F {
                 _ = cap;
                 func
             }
-            fn unify2<'a, R, V, TCap:'a, F: FnMut(&TCap, V) -> R>(func: F, cap: *const TCap) -> F {
+            fn unify2<'a, R, V, TCap:'a, F: FnMut(&TCap, V) -> R>(func: F, cap: *mut TCap) -> F {
                 _ = cap;
                 func
             }
@@ -317,16 +326,8 @@ macro_rules! safe_select {
                 cap: TCap,
                 sel: Option<__SafeSelectImpl<'a,TOut, TCap, $($name),*>>
             }*/
-            let cap = $crate::ord_cap2!(__SafeSelectCapture, $($cap)*);
+            let mut cap = $crate::ord_cap2!(__SafeSelectCapture, $($cap)*);
 
-            /*impl<'a, TOut, TCap, $($name),*> Wrapper<'a, TOut, TCap,  $($name),*> {
-                fn make_static<'b>(&mut self, sel: __SafeSelectImpl<'b, TOut, TCap, $($name),*>)  {
-                    unsafe {
-                        self.sel = Some(::std::mem::transmute(sel));
-                    }
-                }
-            }
-*/
 
             impl<'a, TOut, TCap:'a, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TOut, TCap, $($name),*> where
                 $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
@@ -348,20 +349,9 @@ macro_rules! safe_select {
                 }
             }
 
-/*
-            impl<'a, TOut, TCap:'a, $($name),*> $crate::Stream for Wrapper<'a, TOut, TCap, $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
-            {
-                type Item = TOut;
-                fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<Self::Item>> {
-                    let cap = unsafe { &*(&self.cap as *const _ )};
-                    let sel = unsafe { self.map_unchecked_mut(|x|x.sel.as_mut().unwrap()) };
-                    sel.poll_next(cx, cap)
-                }
-            }*/
 
 
-            let capptr: *const _ = &cap; //TODO: Remove, surely not needed any more
+            let capptr: *mut _ = &mut cap; //TODO: Remove, surely not needed any more
 
             __SafeSelectImpl{
                 cap,
