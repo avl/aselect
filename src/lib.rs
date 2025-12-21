@@ -1,8 +1,10 @@
 pub use futures::Stream;
 use std::cell::UnsafeCell;
-use std::fmt::{Debug, Formatter};
-use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
+use std::marker::{PhantomData, PhantomPinned};
+use std::ops::{ControlFlow, Deref, DerefMut};
+use std::pin::{Pin, pin};
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 pub trait Factory<CTX> {
     type Output;
@@ -39,15 +41,6 @@ pub struct Capture<'a, T> {
     pub value: *const T,
     pub num: usize,
 }
-
-/*impl<'a, T> Clone for Capture<'a, T> {
-    fn clone(&self) -> Self {
-        Self {
-            lock: UnsafeCell::new(false), //TODO: Unsound! Lock must be stored centrally
-        }
-    }
-}*/
-
 impl<'a, T> Capture<'a, T> {
     pub fn new(
         value: &mut T,
@@ -67,12 +60,6 @@ pub struct CaptureGuard<'a, T> {
     pub lock: &'a UnsafeCell<bool>,
     #[doc(hidden)]
     pub value: &'a mut T,
-}
-
-impl<T> Debug for CaptureGuard<'_, T> where T: Debug {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CaptureGuard({:?})", self.value)
-    }
 }
 
 impl<'a, T> Capture<'a, T> {
@@ -171,7 +158,7 @@ macro_rules! ord_cap2 {
 #[macro_export]
 macro_rules! safe_select {
 
-    ( capture ($($cap: ident),*) $($tail:tt)*  ) => {
+    ( capture ($($cap: ident),*), $($tail:tt)*  ) => {
       safe_select!(partial ($($cap),*), parsed $($tail)*)
     };
     // This is a bit convoluted, because we had a tt-muncher to support slightly different
@@ -184,7 +171,6 @@ macro_rules! safe_select {
         safe_select!( innerest capture ( __SafeSelectCapture { $($cap,)* } ), ($($cap),*), $( ( $body, $name, $handler_body)  )* )
     };
     ( innerest capture ($capassign: pat), ($($cap: ident),*), $( (  $body: expr, $name: ident, $handler_body: expr)  )* ) => {
-
         {
 
             #[allow(nonstandard_style)]
@@ -196,9 +182,9 @@ macro_rules! safe_select {
             $(
                 #[allow(nonstandard_style)]
                 struct $name<'a, R, TOut, TCap:'a, TFun, TDecide> where
-                    TFun: FnMut(&TCap) -> Option<R>,
+                    TFun: FnMut(&'a TCap) -> Option<R>,
                     R: Future+'a,
-                    TDecide: FnMut(&TCap, R::Output) -> Option<Option<TOut>>,
+                    TDecide: FnMut(&'a TCap, R::Output) -> Option<Option<TOut>>,
 
                 {
                     fun: TFun,
@@ -210,11 +196,11 @@ macro_rules! safe_select {
                 /// Return Some if future was ready
                 #[allow(nonstandard_style)]
                 impl<'a, R, TOut, TCap:'a, TFun,TDecide> $crate::NewFactory<'a, TCap, TOut> for $name<'a, R, TOut, TCap, TFun, TDecide> where
-                    TFun: FnMut(&TCap) -> Option<R>,
+                    TFun: FnMut(&'a TCap) -> Option<R>,
                     R: Future+'a,
-                    TDecide: FnMut(&TCap, R::Output) -> Option<Option<TOut>>,
+                    TDecide: FnMut(&'a TCap, R::Output) -> Option<Option<TOut>>,
                 {
-                    fn do_poll(&mut self, ctx: &TCap, cx: &mut ::std::task::Context<'_>) -> Option<Option<TOut>> {
+                    fn do_poll(&mut self, ctx: &'a TCap, cx: &mut ::std::task::Context<'_>) -> Option<Option<TOut>> {
                         //println!("Polling: {:?}", self.fut.is_some());
                         let mut was_ready = false;
 
@@ -252,7 +238,7 @@ macro_rules! safe_select {
             )*
 
             #[allow(nonstandard_style)]
-            pub struct __SafeSelectImpl<'a, TOut, TCap:'a, $($name),*> //where
+            pub struct __SafeSelectImpl<'a, TOut, TCap, $($name),*> //where
                 //$($name: $crate::NewFactory<'a, TCap, TOut> ,)*
             {
                 cap: TCap,
@@ -263,7 +249,7 @@ macro_rules! safe_select {
 
             #[allow(nonstandard_style)]
             impl<'a, TOut, TCap:'a, $($name),*> __SafeSelectImpl<'a, TOut, TCap,  $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> + 'a ,)*
+                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
             {
 
                 fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<TOut>> {
@@ -313,7 +299,7 @@ macro_rules! safe_select {
                 }
             }
 
-            fn unify<'a, R: 'a, TCap:'a, F: FnMut(&TCap) -> R>(func: F, cap: *const TCap) -> F {
+            fn unify<'a, R: 'a, TCap:'a, F: FnMut(&'a TCap) -> R>(func: F, cap: *const TCap) -> F {
                 _ = cap;
                 func
             }
@@ -326,10 +312,22 @@ macro_rules! safe_select {
                 func
             }
 
+
+            /*struct Wrapper<'a,TOut, TCap:'a, $($name),*> {
+                cap: TCap,
+                sel: Option<__SafeSelectImpl<'a,TOut, TCap, $($name),*>>
+            }*/
             let cap = $crate::ord_cap2!(__SafeSelectCapture, $($cap)*);
 
+            /*impl<'a, TOut, TCap, $($name),*> Wrapper<'a, TOut, TCap,  $($name),*> {
+                fn make_static<'b>(&mut self, sel: __SafeSelectImpl<'b, TOut, TCap, $($name),*>)  {
+                    unsafe {
+                        self.sel = Some(::std::mem::transmute(sel));
+                    }
+                }
+            }
+*/
 
-            #[allow(nonstandard_style)]
             impl<'a, TOut, TCap:'a, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TOut, TCap, $($name),*> where
                 $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
             {
@@ -341,8 +339,6 @@ macro_rules! safe_select {
                     }
                 }
             }
-
-            #[allow(nonstandard_style)]
             impl<'a, TOut, TCap:'a, $($name),*> ::std::future::Future for __SafeSelectImpl<'a, TOut, TCap, $($name),*> where
                 $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
             {
@@ -352,19 +348,30 @@ macro_rules! safe_select {
                 }
             }
 
+/*
+            impl<'a, TOut, TCap:'a, $($name),*> $crate::Stream for Wrapper<'a, TOut, TCap, $($name),*> where
+                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            {
+                type Item = TOut;
+                fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<Self::Item>> {
+                    let cap = unsafe { &*(&self.cap as *const _ )};
+                    let sel = unsafe { self.map_unchecked_mut(|x|x.sel.as_mut().unwrap()) };
+                    sel.poll_next(cx, cap)
+                }
+            }*/
+
 
             let capptr: *const _ = &cap; //TODO: Remove, surely not needed any more
 
             __SafeSelectImpl{
                 cap,
                     phantom_pinned: ::std::marker::PhantomPinned,
-                    phantom: ::std::marker::PhantomData,
+                phantom: ::std::marker::PhantomData,
                     $(
                     $name: $name {
                         fun: unify(move |temp|{
-                                let ptr = temp as *const _;
                                 #[allow(unused)]
-                                let $capassign = unsafe { &*ptr };
+                                let $capassign = temp;
                                 Some($body)
                             }, capptr),
                         fut: None,
@@ -385,11 +392,13 @@ macro_rules! safe_select {
 
 }
 
-#[cfg(test)]
 mod tests {
-
-    use std::sync::mpsc::{Sender};
+    use futures::Stream;
+    use futures::StreamExt;
+    use std::ops::ControlFlow;
+    use std::pin::pin;
     use std::sync::Mutex;
+    use std::sync::mpsc::{Sender, channel};
     use std::time::Duration;
 
     #[tokio::test(start_paused = true)]

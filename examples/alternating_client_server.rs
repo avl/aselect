@@ -8,12 +8,15 @@ async fn main() {
         server: bool,
     }
 
-    let state = State { server: true };
+    let mut state = State { server: true };
 
     safe_select!(
         capture(state),
-        (
-            if (state.get()?.server) {
+        accepted(
+            {
+                if !state.get()?.server {
+                    return None;
+                }
                 println!("Server");
                 async move {
                     println!("Do server stuff");
@@ -23,10 +26,14 @@ async fn main() {
             |accepted| {
                 println!("Server future completed");
                 state.get()?.server = false;
-                ControlFlow::<()>::Continue(())
+                None::<Option<()>>
             }
-        )(
-            if (!state.get()?.server) {
+        ),
+        connection_result(
+             {
+                 if (state.get()?.server) {
+                    return None
+                }
                 println!("not server");
                 async move {
                     println!("Do client stuff");
@@ -36,17 +43,18 @@ async fn main() {
             |connection_result| {
                 state.get()?.server = true;
                 println!("Client future completed");
-                ControlFlow::<()>::Continue(())
+                None
             }
-        )(
-            if (true) {
+        ),
+        timer(
+            {
                 async move {
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
             },
             |timer| {
                 println!("Timer");
-                ControlFlow::<()>::Continue(())
+                None
             }
         )
     )
