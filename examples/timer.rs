@@ -11,12 +11,13 @@ use tokio::signal;
 async fn main() {
     fn staticer<T: 'static>(t: T) {}
 
-    let mut smuggle = Arc::new(Mutex::new(None));
-    let smuggle2 = smuggle.clone();
+    //let mut smuggle = Arc::new(Mutex::new(None));
+    //let smuggle2 = smuggle.clone();
     {
         safe_select_context!(Timer (connection_attempts: String));
 
         let mut context = Timer::new();
+
         let mut guard = context.connection_attempts().unwrap();
         guard.push_str("hello");
         drop(guard);
@@ -31,13 +32,13 @@ async fn main() {
         };*/
 
         {
+            println!("select");
             safe_select!(
                 context,
-                Timer {
-                    connection_attempts
-                },
+                Timer,
                 conn(
-                    {
+                    (
+                        println!("1");
                         //*connection_attempts.get()? += 1u32;
                         // TODO: Add wrappers around Capture.
                         // Make it so that Capture has private fields and all unsafe methods.
@@ -46,26 +47,29 @@ async fn main() {
                         // code. We know the actual futures don't outlive the context.
                         // So it should(?) be possible to safely give access to Capture contents
                         // without atomics!
-
-                        println!("Conn: {:?}", connection_attempts.get()?);
+                        let m = connection_attempts.as_mut();
+                        println!("m: {:?}", m);
+                        let temp = 47;
+                        println!("Conn: {:?}", connection_attempts.as_mut());
                         //let counter = connection_attempts;
+                        //_ = smuggle.lock().unwrap().replace(connection_attempts);
+                        println!("Made fut");
+                        ()
+                    ),
+                    with(connection_attempts) {
 
-                        smuggle.lock().unwrap().replace(connection_attempts);
-                        async move {
-                            _ = connection_attempts;
-                            //println!("Connection count: {:?}", counter);
+                        println!("Connection count: {:?}", connection_attempts);
+                        println!("temp: {}", temp);
 
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                            44u64
-                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        44u64
                     },
                     {
-                        println!("Continue: {:?}, {:?}", connection_attempts.get()?, conn);
-                        Some(()) //TODO: Fix double option here, quite unsightly!
+                        println!("Continue: {:?}, {:?}", connection_attempts, conn);
+                        Some(())
                     }
                 )
-            );
-
+            ).await;
         }
     }
 

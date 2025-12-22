@@ -1,11 +1,11 @@
 pub use futures::Stream;
 use std::cell::UnsafeCell;
 use std::fmt::{Debug, Formatter};
-use std::marker::{PhantomData, PhantomPinned};
-use std::ops::{ControlFlow, Deref, DerefMut};
-use std::pin::{Pin, pin};
-use std::task::{Context, Poll};
-use std::time::Duration;
+use std::ops::{Deref, DerefMut};
+use std::ptr::null_mut;
+
+#[cfg(test)]
+mod tests;
 
 pub trait Factory<CTX> {
     type Output;
@@ -49,8 +49,38 @@ impl<T> Capture< T> {
             value: UnsafeCell::new(value),
         }
     }
+    pub unsafe fn access(&self) -> CaptureAccess<T> {
+        if !*self.locks.get() {
+            CaptureAccess{
+                value: self.value.get()
+            }
+        } else {
+            CaptureAccess{
+                value: null_mut()
+            }
+        }
+    }
 }
+
+pub struct CaptureAccess<T> {
+    value: *mut T
+}
+
+impl<T> CaptureAccess<T> {
+    pub unsafe fn get(&self) -> Option<&'_ mut T> {
+        if self.value.is_null() {
+            None
+        } else {
+            Some(unsafe {&mut *self.value})
+        }
+    }
+
+}
+
+
+
 pub struct CaptureGuard<'a, T> {
+    lock: &'a UnsafeCell<bool>,
     #[doc(hidden)]
     pub value: &'a mut T,
 }
@@ -65,22 +95,26 @@ where
 }
 
 impl<T> Capture<T> {
-    pub fn get(&self) -> Option<CaptureGuard<T>> {
+    pub fn lock(&self) -> Option<CaptureGuard<T>> {
         let locks = unsafe { &mut *self.locks.get() };
         if *locks {
             return None;
         }
         //TODO: FIX!
-        //*locks = true;
+        *locks = true;
         Some(CaptureGuard {
+            lock: &self.locks,
             value: unsafe { &mut *(self.value.get()) },
         })
     }
 }
+
+
+
 impl<T> Drop for CaptureGuard<'_, T> {
 
     fn drop(&mut self) {
-
+        unsafe {*self.lock.get() = false }
     }
 }
 
@@ -95,6 +129,7 @@ impl<T> Capture<Option<T>> {
         let value = unsafe { &mut *(self.value.get()) }.as_mut()?;
 
         Some(CaptureGuard {
+            lock: &self.locks,
             value,
         })
     }
@@ -133,18 +168,6 @@ impl<'a, T> DerefMut for CaptureGuard<'a, T> {
     }
 }
 
-macro_rules! ord_cap {
-    ($($cap:ident),*) => {
-        ord_cap!(inner 0, parsed $($cap)*)
-    };
-    (inner $depth:expr, $(($cap0:ident, $count:expr))* parsed $cap:ident $($cap1:ident)*) => {
-        ord_cap!(inner ($depth + 1), $(($cap0, $count) )* ($cap, $depth) parsed $($cap1),* )
-    };
-
-    (inner $depth:expr, $(($cap0:ident, $count:expr))* parsed) => {
-        ($( ($cap0, $count) ),*)
-    };
-}
 
 #[macro_export]
 macro_rules! ord_cap2 {
@@ -177,7 +200,7 @@ macro_rules! safe_select_context {
         impl $contextname {
             $(
                 pub fn $cap(&self) -> Option<$crate::CaptureGuard<$capty>> {
-                    self.$cap.get()
+                    self.$cap.lock()
                 }
             )*
         }
@@ -199,11 +222,11 @@ macro_rules! safe_select_context {
 #[macro_export]
 macro_rules! safe_select {
 
-    ( $contextname:ident , $contexttype:pat, $( $name: ident ( $body: expr, $handler_body: expr)  )* $(,)? ) => {
-        safe_select!( innerest $contextname, $contexttype , $( ( $body, $name, $handler_body) )* )
+    ( $contextname:ident, $contexttype:ty, $( $name: ident ( ($($body0: stmt)*), with($($cap:ident),*) $body1: expr, $handler_body: expr)  )* $(,)? ) => {
+        safe_select!( innerest $contextname, $contexttype , $( ( ($($body0)*), ($($cap),*), $body1, $name, $handler_body) )* )
     };
 
-    ( innerest $contextname:ident, $contexttype:pat , $( ( $body: expr, $name: ident, $handler_body: expr)  )* ) => {
+    ( innerest $contextname:ident, $contexttype:ty , $( ( ($($body0: stmt)*), ($($cap:ident),*), $body1: expr, $name: ident, $handler_body: expr)  )* ) => {
 
         {
 
@@ -266,18 +289,17 @@ macro_rules! safe_select {
             )*
 
             #[allow(nonstandard_style)]
-            pub struct __SafeSelectImpl<'a, TOut, TCap:'a, $($name),*> //where
-                //$($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            pub struct __SafeSelectImpl<'a, TOut, $($name),*>
             {
-                cap: &'a TCap,
+                cap: &'a $contexttype,
                 $($name: $name,)*
-                phantom: ::std::marker::PhantomData<(&'a TCap, TOut)>,
+                phantom: ::std::marker::PhantomData<(&'a TOut)>,
                 phantom_pinned: ::std::marker::PhantomPinned
             }
 
             #[allow(nonstandard_style)]
-            impl<'a, TOut, TCap:'a, $($name),*> __SafeSelectImpl<'a, TOut, TCap,  $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            impl<'a, TOut, $($name),*> __SafeSelectImpl<'a, TOut,  $($name),*> where
+                $($name: $crate::NewFactory<'a, $contexttype, TOut> ,)*
             {
 
                 fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<TOut>> {
@@ -314,8 +336,8 @@ macro_rules! safe_select {
 
 
             #[allow(nonstandard_style)]
-            impl<'a, TOut, TCap, $($name),*> __SafeSelectImpl<'a, TOut, TCap,  $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            impl<'a, TOut, $($name),*> __SafeSelectImpl<'a, TOut,  $($name),*> where
+                $($name: $crate::NewFactory<'a, $contexttype, TOut> ,)*
             {
                 fn poll_impl(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<TOut> {
                     //println!("Future poll");
@@ -345,8 +367,8 @@ macro_rules! safe_select {
 
 
 
-            impl<'a, TOut, TCap:'a, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TOut, TCap, $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            impl<'a, TOut, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TOut, $($name),*> where
+                $($name: $crate::NewFactory<'a, $contexttype, TOut> ,)*
             {
                 type Item = TOut;
                 fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<Self::Item>> {
@@ -356,8 +378,8 @@ macro_rules! safe_select {
                     }
                 }
             }
-            impl<'a, TOut, TCap:'a, $($name),*> ::std::future::Future for __SafeSelectImpl<'a, TOut, TCap, $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            impl<'a, TOut, $($name),*> ::std::future::Future for __SafeSelectImpl<'a, TOut, $($name),*> where
+                $($name: $crate::NewFactory<'a, $contexttype, TOut> ,)*
             {
                 type Output = TOut;
                 fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Self::Output> {
@@ -375,19 +397,34 @@ macro_rules! safe_select {
                     phantom: ::std::marker::PhantomData,
                     $(
                     $name: $name {
-                        fun: unify_fut(|temp|{
-                            let $contexttype = temp;
-                            Some($body)
+                        fun: unify_fut(|temp:&$contexttype|{
+                            $(
+                                let mut tempg = unsafe { temp.$cap.access()};
+                                let mut $cap = unsafe { tempg.get() };
+                            )*
+                            Some({
+                                $($body0 ;)*
+                                async move {
+                                    $(
+                                        let $cap = temp.$cap.lock()?;
+                                    )*
+
+                                    Some($body1)
+                                }
+                            })
                         }),
                         fut: None,
-                        decide: unify2(move |temp, $name|{
-                                let $contexttype = temp;
+                        decide: unify2(move |temp:&$contexttype, $name|{
+                                $(
+                                    let mut tempg = unsafe { temp.$cap.access()};
+                                    let mut $cap = unsafe { tempg.get() };
+                                )*
                                 Some($handler_body)
                             }),
                         phantom_cap: ::std::marker::PhantomData,
                     },
                     )*
-            }.await
+            }
         }
 
 
@@ -397,134 +434,3 @@ macro_rules! safe_select {
 
 }
 
-mod tests {
-    use futures::Stream;
-    use futures::StreamExt;
-    use std::ops::ControlFlow;
-    use std::pin::pin;
-    use std::sync::Mutex;
-    use std::sync::mpsc::{Sender, channel};
-    use std::time::Duration;
-
-    #[tokio::test(start_paused = true)]
-    async fn test() {
-        tokio::time::timeout(Duration::from_secs(1), async move {
-            let tempcap = 42u16;
-            let temp2 = 43u32;
-            let mut strm = safe_select!(
-                capture(tempcap, temp2),
-                (
-                    if (true) {
-                        //println!("1 Tempcap:  {} : {}", tempcap, temp2);
-                        //*tempcap += 2;
-                        async move {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            42u64
-                        }
-                    },
-                    |pred1| ControlFlow::Break(pred1)
-                )(
-                    {
-                        //*tempcap += 10;
-                        async move {
-                            tokio::time::sleep(Duration::from_millis(75)).await;
-                            43u32
-                        }
-                    },
-                    |_pred2| {
-                        //println!("2 Result Tempcap:  {} : {}", tempcap, temp2);
-                        ControlFlow::Continue(())
-                    }
-                )
-            );
-
-            {
-                let n = strm.await;
-                println!("Got: {:?}", n);
-            }
-        })
-        .await
-        .unwrap_err();
-    }
-
-    static SMUGGLER: Mutex<Option<Sender<&'static u16>>> = Mutex::new(None);
-
-    #[tokio::test(start_paused = true)]
-    async fn test_miri_cap() {
-        let (tx, rx) = channel();
-        SMUGGLER.lock().unwrap().replace(tx);
-
-        tokio::time::timeout(Duration::from_millis(200), async move {
-            let tempcap = 42u16;
-            let temp2 = 43u32;
-            let mut strm = pin!(safe_select!(
-                capture(tempcap, temp2),
-                (
-                    if (true) {
-                        //println!("1 Tempcap:  {} : {}", tempcap, temp2);
-                        //*tempcap += 1;
-                        //SMUGGLER.lock().unwrap().as_mut().unwrap().send(tempcap);
-                        //let tx = tx.clone();
-                        *tempcap.get()? += 10;
-
-                        println!("tempcap: {}", *tempcap.get()?);
-
-                        //*tempcap += 1;
-                        async move {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            //*tempcap += 1;
-                            42u64
-                        }
-                    },
-                    |pred1| ControlFlow::Break(pred1)
-                )(
-                    {
-                        let mut temp = tempcap.get().unwrap();
-                        *temp += 1;
-                        println!("tempcap: {}", *temp);
-                        async move {
-                            tokio::time::sleep(Duration::from_millis(75)).await;
-                            //*tempcap += 20;
-                            43u32
-                        }
-                    },
-                    |_pred2| {
-                        //println!("2 Result Tempcap:  {} : {}", tempcap, temp2);
-
-                        ControlFlow::Continue(())
-                    }
-                )
-            ));
-
-            {
-                let n = strm.await;
-                println!("Got: {:?}", n);
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    #[test]
-    fn test2() {
-        let mut a = 4u32;
-
-        let t;
-        {
-            let mut b = &mut a;
-            let t2 = &mut b;
-            t = &mut *t2;
-            //t = &mut b.0;
-        }
-        //println!("t: {}", t);
-    }
-
-    #[test]
-    fn test_counter() {
-        let abc = "abc";
-        let def = "def";
-        let temp = ord_cap!(abc, def);
-
-        assert_eq!(temp, ((abc, 0), (def, 1)))
-    }
-}
