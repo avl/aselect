@@ -30,7 +30,6 @@ pub trait NewFactory<'a, CTX, TOut> {
 }
 
 pub struct Capture<T> {
-    //TODO: Hide this from user
     #[doc(hidden)]
     locks: UnsafeCell<bool>,
     #[doc(hidden)]
@@ -50,7 +49,7 @@ impl<T> Capture< T> {
         }
     }
     pub unsafe fn access(&self) -> CaptureAccess<T> {
-        if !*self.locks.get() {
+        if unsafe { !*self.locks.get() } {
             CaptureAccess{
                 value: self.value.get()
             }
@@ -95,7 +94,8 @@ where
 }
 
 impl<T> Capture<T> {
-    pub fn lock(&self) -> Option<CaptureGuard<T>> {
+    #[doc(hidden)]
+    pub unsafe fn lock(&self) -> Option<CaptureGuard<'_, T>> {
         let locks = unsafe { &mut *self.locks.get() };
         if *locks {
             return None;
@@ -118,53 +118,18 @@ impl<T> Drop for CaptureGuard<'_, T> {
     }
 }
 
-impl<T> Capture<Option<T>> {
-    pub fn get_some<'a>(&'a self) -> Option<CaptureGuard<'a, T>> {
-        let locks = unsafe { &mut *self.locks.get() };
-        if *locks {
-            return None;
-        }
-        *locks = true;
-
-        let value = unsafe { &mut *(self.value.get()) }.as_mut()?;
-
-        Some(CaptureGuard {
-            lock: &self.locks,
-            value,
-        })
-    }
-    pub fn take(&self) -> Option<T> {
-        /*let locks = unsafe { &mut *self.locks.get() };
-        if *locks & (1<< self.num) != 0 {
-            return None;
-        }
-        unsafe { (*(self.value as *mut Option<T>)).take() }*/
-        todo!()
-    }
-}
-
-/*impl<'a, T> CaptureGuard<'a, T> {
-    pub fn map<R>(self, map: impl FnOnce(&mut T) -> Option<&mut R>) -> Option<CaptureGuard<'a, R>> {
-        let vptr = self.value as *mut _;
-        let new_value = map(unsafe { &mut *vptr })?;
-        std::mem::forget(self);
-        Some(CaptureGuard {
-            value: new_value,
-        })
-    }
-}*/
 
 impl<'a, T> Deref for CaptureGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { self.value }
+        self.value
     }
 }
 
 impl<'a, T> DerefMut for CaptureGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { self.value }
+        self.value
     }
 }
 
@@ -197,14 +162,7 @@ macro_rules! safe_select_context {
             $($cap: $crate::Capture< $capty>, )*
         };
 
-        impl $contextname {
-            $(
-                pub fn $cap(&self) -> Option<$crate::CaptureGuard<$capty>> {
-                    self.$cap.lock()
-                }
-            )*
-        }
-
+        #[allow(nonstandard_style)]
         impl $contextname {
             pub fn new() -> Self {
                 Self {
@@ -212,21 +170,59 @@ macro_rules! safe_select_context {
                 }
             }
         }
-
+        #[allow(non_snake_case)]
+        let $contextname = $contextname::new();
 
 
     };
 }
 
 
+/// A small helper macro to expand a sequence of expressions and statements.
+///
+// TODO: Is this _really_ needed? Can't we inject our variables in an outer scope?
+#[macro_export]
+macro_rules! expand_arbitrary {
+    () => {
+
+    };
+    ( ($e:expr) $($tail:tt)* ) => {
+        $e
+        expand_arbitrary!( $($tail)* )
+    };
+    ( ($e:stmt) $( $tail:tt)* ) => {
+        $e
+        expand_arbitrary!( $($tail)* )
+    };
+}
+
+pub trait SafeResult {
+    type Output;
+    fn result(self) -> Option<Self::Output>;
+}
+pub fn result<T: SafeResult>(input: Option<T>) -> Option<T::Output> {
+    input?.result()
+}
+impl<R> SafeResult for Option<R> {
+    type Output = R;
+
+    fn result(self) -> Option<Self::Output> {
+        Some(self?)
+    }
+}
+impl SafeResult for () {
+    type Output = ();
+    fn result(self) -> Option<Self::Output> {
+        None
+    }
+}
+
 #[macro_export]
 macro_rules! safe_select {
-
-    ( $contextname:ident, $contexttype:ty, $( $name: ident ( ($($body0: stmt)*), with($($cap:ident),*) $body1: expr, $handler_body: expr)  )* $(,)? ) => {
-        safe_select!( innerest $contextname, $contexttype , $( ( ($($body0)*), ($($cap),*), $body1, $name, $handler_body) )* )
+    ( $contextname:tt, $( $name: ident ( |$($cap0:ident),*| {$($body0: stmt ;)*}, async |$($cap1:ident),*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
+        safe_select!(inner $contextname, $contextname, $($name  ( |$($cap0),*|  {$($body0 ;)*}, async |$($cap1),*| $body1, |$result| $handler_body), )*)
     };
-
-    ( innerest $contextname:ident, $contexttype:ty , $( ( ($($body0: stmt)*), ($($cap:ident),*), $body1: expr, $name: ident, $handler_body: expr)  )* ) => {
+    ( inner $contextname:ident, $contexttype:ty, $( $name: ident  ( |$($cap0:ident),*| {$($body0: stmt ;)*}, async |$($cap1:ident),*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
 
         {
 
@@ -244,7 +240,8 @@ macro_rules! safe_select {
                     phantom_cap: ::std::marker::PhantomData<&'a TCap>,
                 }
 
-                /// Return Some if future was ready
+                /// Return Some if future was ready (and thus must be recreated before next iteration)
+                /// Return Some(Some(_)) if it also produced a value
                 #[allow(nonstandard_style)]
                 impl<'a, R, TOut, TCap:'a, TFun,TDecide> $crate::NewFactory<'a, TCap, TOut> for $name<'a, R, TOut, TCap, TFun, TDecide> where
                     TFun: FnMut(&'a TCap) -> Option<R>,
@@ -360,13 +357,9 @@ macro_rules! safe_select {
             }
 
 
-            /*struct Wrapper<'a,TOut, TCap:'a, $($name),*> {
-                cap: TCap,
-                sel: Option<__SafeSelectImpl<'a,TOut, TCap, $($name),*>>
-            }*/
 
 
-
+            #[allow(nonstandard_style)]
             impl<'a, TOut, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TOut, $($name),*> where
                 $($name: $crate::NewFactory<'a, $contexttype, TOut> ,)*
             {
@@ -378,6 +371,8 @@ macro_rules! safe_select {
                     }
                 }
             }
+
+            #[allow(nonstandard_style)]
             impl<'a, TOut, $($name),*> ::std::future::Future for __SafeSelectImpl<'a, TOut, $($name),*> where
                 $($name: $crate::NewFactory<'a, $contexttype, TOut> ,)*
             {
@@ -399,14 +394,15 @@ macro_rules! safe_select {
                     $name: $name {
                         fun: unify_fut(|temp:&$contexttype|{
                             $(
-                                let mut tempg = unsafe { temp.$cap.access()};
-                                let mut $cap = unsafe { tempg.get() };
+                                let mut tempg = unsafe { temp.$cap0.access()};
+                                let mut $cap0 = unsafe { tempg.get() };
                             )*
                             Some({
-                                $($body0 ;)*
+                                use safeselect::expand_arbitrary;
+                                $crate::expand_arbitrary!($( ($body0) )*);
                                 async move {
                                     $(
-                                        let $cap = temp.$cap.lock()?;
+                                        let $cap1 = unsafe { temp.$cap1.lock()? };
                                     )*
 
                                     Some($body1)
@@ -414,12 +410,15 @@ macro_rules! safe_select {
                             })
                         }),
                         fut: None,
-                        decide: unify2(move |temp:&$contexttype, $name|{
+                        decide: unify2(move |temp:&$contexttype, $result|{
                                 $(
-                                    let mut tempg = unsafe { temp.$cap.access()};
-                                    let mut $cap = unsafe { tempg.get() };
+                                    let mut tempg = unsafe { temp.$cap0.access()};
+                                    let mut $cap0 = unsafe { tempg.get() };
                                 )*
-                                Some($handler_body)
+                                let t = Some($handler_body);
+                                let r = $crate::result(t);
+                                println!("Produced reuslt: {}", r.is_some());
+                                r
                             }),
                         phantom_cap: ::std::marker::PhantomData,
                     },
