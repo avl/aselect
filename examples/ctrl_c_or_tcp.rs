@@ -1,7 +1,4 @@
-use futures::Stream;
 use safeselect::{safe_select, safe_select_context};
-use std::ops::ControlFlow;
-use std::sync::{Arc, Mutex};
 use tokio::net::TcpStream;
 use tokio::signal;
 
@@ -12,8 +9,8 @@ async fn main() {
     {
         safe_select!(
             State,
-            ctrl_c(
-                |connection_attempts| {},
+            ctrl_c(connection_attempts)(
+                 {},
                 async | | { signal::ctrl_c().await },
                 |ctrl_c| {
                     println!(
@@ -24,8 +21,8 @@ async fn main() {
                     Some(())
                 }
             ),
-            conn(
-                |connection_attempts| {
+            conn(connection_attempts)(
+                 {
                     *connection_attempts? += 1;
                 },
                 async | | {

@@ -100,7 +100,6 @@ impl<T> Capture<T> {
         if *locks {
             return None;
         }
-        //TODO: FIX!
         *locks = true;
         Some(CaptureGuard {
             lock: &self.locks,
@@ -219,7 +218,7 @@ impl SafeResult for () {
 
 #[macro_export]
 macro_rules! safe_select {
-    ( $contextname:tt, $( $name: ident ( |$($cap0:ident),*| {$($body0: stmt ;)*}, async |$($cap1:ident),*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
+    ( $contextname:tt, $( $name: ident($($cap0:ident),*) ( {$($body0: stmt ;)*}, async |$($cap1:ident),*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
         safe_select!(inner $contextname, $contextname, $($name  ( |$($cap0),*|  {$($body0 ;)*}, async |$($cap1),*| $body1, |$result| $handler_body), )*)
     };
     ( inner $contextname:ident, $contexttype:ty, $( $name: ident  ( |$($cap0:ident),*| {$($body0: stmt ;)*}, async |$($cap1:ident),*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {

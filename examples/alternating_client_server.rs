@@ -8,8 +8,7 @@ async fn main() {
 
     safe_select!(
         State,
-        accepted(
-            |server|
+        accepted(server)(
             {
                 if !*server? {
                     return None;
@@ -26,8 +25,8 @@ async fn main() {
                 None
             }
         ),
-        connection_result(
-             |server|{
+        connection_result(server)(
+             {
                  if *server? {
                     return None;
                 };
@@ -43,8 +42,8 @@ async fn main() {
                 None
             }
         ),
-        timer(
-            |server|{},
+        timer(server)(
+            {},
             async | | {
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             },
