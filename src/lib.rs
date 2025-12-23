@@ -1,7 +1,6 @@
 pub use futures::Stream;
 use std::cell::UnsafeCell;
 use std::fmt::{Debug, Formatter};
-use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
 
 #[cfg(test)]
@@ -81,7 +80,7 @@ impl<T> CaptureAccess<T> {
 pub struct CaptureGuard<'a, T> {
     lock: &'a UnsafeCell<bool>,
     #[doc(hidden)]
-    pub value: &'a mut T,
+    value: *mut T,
 }
 
 impl<'a, T> Debug for CaptureGuard<'a, T>
@@ -90,6 +89,15 @@ where
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "CaptureGuard({:?})", self.value)
+    }
+}
+
+impl<'a, T> CaptureGuard<'a, T>
+where
+    T: Debug,
+{
+    pub unsafe fn get_mut(&mut self) -> &mut T {
+        unsafe {&mut *self.value}
     }
 }
 
@@ -117,20 +125,6 @@ impl<T> Drop for CaptureGuard<'_, T> {
     }
 }
 
-
-impl<'a, T> Deref for CaptureGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        self.value
-    }
-}
-
-impl<'a, T> DerefMut for CaptureGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        self.value
-    }
-}
 
 
 #[macro_export]
@@ -391,7 +385,7 @@ macro_rules! safe_select {
                     phantom: ::std::marker::PhantomData,
                     $(
                     $name: $name {
-                        fun: unify_fut(|temp:&$contexttype|{
+                        fun: unify_fut(move|temp:&$contexttype|{
                             $(
                                 let mut tempg = unsafe { temp.$cap0.access()};
                                 let mut $cap0 = unsafe { tempg.get() };
@@ -399,12 +393,15 @@ macro_rules! safe_select {
                             Some({
                                 use safeselect::expand_arbitrary;
                                 $crate::expand_arbitrary!($( ($body0) )*);
+                                    $(
+                                        let mut templ = unsafe { temp.$cap1.lock()? };
+                                    )*
                                 async move {
                                     $(
-                                        let $cap1 = unsafe { temp.$cap1.lock()? };
+                                        let $cap1 = unsafe { templ.get_mut() };
                                     )*
 
-                                    Some($body1)
+                                    $body1
                                 }
                             })
                         }),
@@ -415,9 +412,7 @@ macro_rules! safe_select {
                                     let mut $cap0 = unsafe { tempg.get() };
                                 )*
                                 let t = Some($handler_body);
-                                let r = $crate::result(t);
-                                println!("Produced reuslt: {}", r.is_some());
-                                r
+                                $crate::result(t)
                             }),
                         phantom_cap: ::std::marker::PhantomData,
                     },

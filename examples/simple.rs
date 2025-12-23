@@ -13,12 +13,12 @@ async fn main() {
                     // TODO: Figure out if Capture is protected enough that a user
                     // can't smuggle one out in unsafe code and violate the rules for
                     // UnsafeCell access
+                    println!("{:?}", value);
                     *value? = "Hello".to_string();
-                    let mut value_moved_into_future = "World".to_string();
+                    let value_moved_into_future = "World".to_string();
                 },
-                async | | {
-                    println!("Message: {}", value_moved_into_future);
-
+                async | value | {
+                    println!("Message: {}, value: {:?}", value_moved_into_future, value);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     44u64
                 },
