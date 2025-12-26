@@ -1,6 +1,7 @@
 pub use futures::Stream;
 use std::cell::UnsafeCell;
 use std::fmt::{Debug, Formatter};
+use std::marker::PhantomData;
 use std::ptr::null_mut;
 
 #[cfg(test)]
@@ -28,23 +29,25 @@ pub trait NewFactory<'a, CTX, TOut> {
     fn do_poll(&mut self, ctx: &'a CTX, cx: &mut ::std::task::Context<'_>) -> Option<Option<TOut>>;
 }
 
-pub struct Capture<T> {
+pub struct Capture<'a, T:'a> {
     #[doc(hidden)]
     locks: UnsafeCell<bool>,
     #[doc(hidden)]
     value: UnsafeCell<T>,
+    phantom: PhantomData<&'a ()>,
 
 }
-impl<T:Debug> Debug for Capture<T> {
+impl<'a, T:Debug> Debug for Capture<'a, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "Capture()")
     }
 }
-impl<T> Capture< T> {
+impl<'a, T:'a> Capture<'a,T> {
     pub fn new(value: T) -> Self {
         Self {
             locks: UnsafeCell::new(false),
             value: UnsafeCell::new(value),
+            phantom: PhantomData,
         }
     }
     pub unsafe fn access(&self) -> CaptureAccess<T> {
@@ -101,7 +104,7 @@ where
     }
 }
 
-impl<T> Capture<T> {
+impl<'a, T:'a> Capture<'a, T> {
     #[doc(hidden)]
     pub unsafe fn lock(&self) -> Option<CaptureGuard<'_, T>> {
         let locks = unsafe { &mut *self.locks.get() };
@@ -147,19 +150,19 @@ macro_rules! ord_cap2 {
 
 #[macro_export]
 macro_rules! safe_select_context {
-    ( $contextname:ident ($($cap: ident: $capty: ty),*) ) => {
+    ( $contextname:ident ($($cap: ident: $capty: ty = $capvalue: expr),*) ) => {
 
 
         #[allow(nonstandard_style)]
-        pub struct $contextname {
-            $($cap: $crate::Capture< $capty>, )*
+        pub struct $contextname<'a> {
+            $($cap: $crate::Capture<'a, $capty>, )*
         };
 
         #[allow(nonstandard_style)]
-        impl $contextname {
+        impl<'a> $contextname<'a> {
             pub fn new() -> Self {
                 Self {
-                        $($cap: $crate::Capture::new(Default::default()), )*
+                        $($cap: $crate::Capture::new($capvalue), )*
                 }
             }
         }
@@ -212,8 +215,8 @@ impl SafeResult for () {
 
 #[macro_export]
 macro_rules! safe_select {
-    ( $contextname:tt, $( $name: ident($($cap0:ident),*) ( {$($body0: stmt ;)*}, async |$($cap1:ident),*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
-        safe_select!(inner $contextname, $contextname, $($name  ( |$($cap0),*|  {$($body0 ;)*}, async |$($cap1),*| $body1, |$result| $handler_body), )*)
+    ( $contextname:ident, $contexttype:ty, $( $name: ident($($cap0:ident),*) ( {$($body0: stmt ;)*}, async |$($cap1:ident),*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
+        safe_select!(inner $contextname, $contexttype, $($name  ( |$($cap0),*|  {$($body0 ;)*}, async |$($cap1),*| $body1, |$result| $handler_body), )*)
     };
     ( inner $contextname:ident, $contexttype:ty, $( $name: ident  ( |$($cap0:ident),*| {$($body0: stmt ;)*}, async |$($cap1:ident),*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
 
@@ -281,7 +284,7 @@ macro_rules! safe_select {
             #[allow(nonstandard_style)]
             pub struct __SafeSelectImpl<'a, TOut, $($name),*>
             {
-                cap: &'a $contexttype,
+                cap: $contextname<'a>,
                 $($name: $name,)*
                 phantom: ::std::marker::PhantomData<(&'a TOut)>,
                 phantom_pinned: ::std::marker::PhantomPinned
@@ -289,7 +292,7 @@ macro_rules! safe_select {
 
             #[allow(nonstandard_style)]
             impl<'a, TOut, $($name),*> __SafeSelectImpl<'a, TOut,  $($name),*> where
-                $($name: $crate::NewFactory<'a, $contexttype, TOut> ,)*
+                $($name: $crate::NewFactory<'a, $contextname<'a>, TOut> ,)*
             {
 
                 fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<TOut>> {
@@ -302,7 +305,7 @@ macro_rules! safe_select {
                         totcount += 1;
                     )*
 
-                    let cap_ptr = this.cap as *const _;
+                    let cap_ptr = (&this.cap) as *const _;
                     loop {
                         $(
 
@@ -327,7 +330,7 @@ macro_rules! safe_select {
 
             #[allow(nonstandard_style)]
             impl<'a, TOut, $($name),*> __SafeSelectImpl<'a, TOut,  $($name),*> where
-                $($name: $crate::NewFactory<'a, $contexttype, TOut> ,)*
+                $($name: $crate::NewFactory<'a, $contextname<'a>, TOut> ,)*
             {
                 fn poll_impl(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<TOut> {
                     //println!("Future poll");
@@ -354,7 +357,7 @@ macro_rules! safe_select {
 
             #[allow(nonstandard_style)]
             impl<'a, TOut, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TOut, $($name),*> where
-                $($name: $crate::NewFactory<'a, $contexttype, TOut> ,)*
+                $($name: $crate::NewFactory<'a, $contextname<'a>, TOut> ,)*
             {
                 type Item = TOut;
                 fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<Self::Item>> {
@@ -367,7 +370,7 @@ macro_rules! safe_select {
 
             #[allow(nonstandard_style)]
             impl<'a, TOut, $($name),*> ::std::future::Future for __SafeSelectImpl<'a, TOut, $($name),*> where
-                $($name: $crate::NewFactory<'a, $contexttype, TOut> ,)*
+                $($name: $crate::NewFactory<'a, $contextname<'a>, TOut> ,)*
             {
                 type Output = TOut;
                 fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Self::Output> {
@@ -380,12 +383,12 @@ macro_rules! safe_select {
 
 
             __SafeSelectImpl {
-                cap: &$contextname,
+                cap: $contextname,
                     phantom_pinned: ::std::marker::PhantomPinned,
                     phantom: ::std::marker::PhantomData,
                     $(
                     $name: $name {
-                        fun: unify_fut(move|temp:&$contexttype|{
+                        fun: unify_fut(move|temp:&$contextname<'_>|{
                             $(
                                 let mut tempg = unsafe { temp.$cap0.access()};
                                 let mut $cap0 = unsafe { tempg.get() };
@@ -406,7 +409,7 @@ macro_rules! safe_select {
                             })
                         }),
                         fut: None,
-                        decide: unify2(move |temp:&$contexttype, $result|{
+                        decide: unify2(move |temp:&$contextname<'_>, $result|{
                                 $(
                                     let mut tempg = unsafe { temp.$cap0.access()};
                                     let mut $cap0 = unsafe { tempg.get() };

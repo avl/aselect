@@ -8,18 +8,19 @@ use tokio::net::{TcpListener, TcpStream};
 #[tokio::main]
 async fn main() {
     safe_select_context!(State (
-        port: Option<u16>,
-        server: Option<TcpListener>,
-        new_conn: Option<TcpStream>
+        port: Option<u16> = None,
+        server: Option<TcpListener> = None,
+        new_conn: Option<TcpStream> = None
     ));
     
     let listen_factory = || TcpListener::bind("127.0.0.1:0");
 
-    fn staticer<T:'static>(_s: &'static T) {
+    fn staticer<T:'static>(_s: &T) {
     }
 
     let temp = safe_select!(
         State,
+        State<'_>,
         create_listener(server,port)(
             {
                 if port?.is_some() {
@@ -90,6 +91,7 @@ async fn main() {
             }
         ),
     );
+    staticer(&temp);
     let mut temp2 = pin!(temp);
     while let Some(val) = temp2.next().await {
         println!("Stream produced: {:?}", val);
