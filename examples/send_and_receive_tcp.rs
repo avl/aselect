@@ -1,57 +1,55 @@
-use std::pin::pin;
-use safeselect::{safe_select, safe_select_context};
-use std::time::Duration;
 use futures::StreamExt;
+use safeselect::safe_select;
+use std::pin::pin;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::main]
 async fn main() {
-    safe_select_context!(State (
-        port: Option<u16> = None,
-        server: Option<TcpListener> = None,
-        new_conn: Option<TcpStream> = None
-    ));
-    
+    let port: Option<u16> = None;
+    let server: Option<TcpListener> = None;
+    let new_conn: Option<TcpStream> = None;
+
     let listen_factory = || TcpListener::bind("127.0.0.1:0");
 
-    fn staticer<T:'static>(_s: &T) {
-    }
+    fn staticer<T: 'static>(_s: &T) {}
 
     let temp = safe_select!(
-        State,
-        State<'_>,
-        create_listener(server,port)(
+        {
+            mutable(port, new_conn);
+            borrowed(server);
+        },
+        create_listener(
             {
-                if port?.is_some() {
+                let port: &mut Option<_> = port;
+                if port.is_some() {
                     return None;
                 };
-                let listener = listen_factory();
+                listen_factory()
             },
-            async | server, port | {
-                listener.await
-            },
+            async |listen_factory_fut| { listen_factory_fut.await },
             |listener| {
                 if let Ok(listener) = listener {
                     let listener: TcpListener = listener;
                     println!("New listener");
-                    *port? = Some(listener.local_addr().unwrap().port());
+                    *port = Some(listener.local_addr().unwrap().port());
                     *server? = Some(listener);
                 }
                 None
             }
         ),
-        accept(new_conn, server)(
+        accept(
             {
-                _ = server?.as_mut()?;
+                if server.is_none() {
+                    return None;
+                }
             },
-            async | server | {
-                server.as_mut().unwrap().accept().await.map(|x| x.0)
-            },
+            async |_input, server| { server.as_mut().unwrap().accept().await.map(|x| x.0) },
             |accept_result| {
                 match accept_result {
                     Ok(connection) => {
-                        *new_conn? = Some(connection);
+                        *new_conn = Some(connection);
                         println!("Accepted");
                     }
                     Err(_) => {}
@@ -59,11 +57,12 @@ async fn main() {
                 None
             }
         ),
-        connect_and_send(port)(
+        connect_and_send(
             {
-                let cur_port:u16 = (*(port?))?;
+                let cur_port: u16 = (*port)?;
+                cur_port
             },
-            async | | {
+            async |cur_port| {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let mut conn = TcpStream::connect(format!("127.0.0.1:{}", cur_port))
                     .await
@@ -75,13 +74,14 @@ async fn main() {
                 None
             }
         ),
-        receive(new_conn)(
+        receive(
             {
-                let mut conn: TcpStream = new_conn?.take()?;
+                let mut conn: TcpStream = new_conn.take()?;
+                Some(conn)
             },
-            async | | {
+            async |conn| {
                 let mut buf = [0u8; 5];
-                conn.read_exact(&mut buf).await.unwrap();
+                conn.unwrap().read_exact(&mut buf).await.unwrap();
                 String::from_utf8_lossy(&buf).to_string()
             },
             |res3| {
@@ -97,5 +97,4 @@ async fn main() {
         println!("Stream produced: {:?}", val);
     }
     temp2.await;
-
 }

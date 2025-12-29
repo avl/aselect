@@ -1,51 +1,55 @@
-use safeselect::{safe_select, safe_select_context};
-use std::ops::ControlFlow;
-use std::time::Duration;
+use safeselect::{safe_select};
 
 #[tokio::main]
 async fn main() {
-    safe_select_context!(State (server: bool));
-
+    let server = false;
     safe_select!(
-        State,
-        accepted(server)(
+        {
+            mutable(server);
+        },
+        accepted(
             {
-                if !*server? {
+                let mut server : &mut bool = server;
+                if !*server {
+                    println!("Not time to be server");
                     return None;
                 };
                 println!("Server");
             },
-            async | |{
+            async | _input |{
                 println!("Do server stuff");
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                println!("Done server stuff");
             },
             |result|{
-                *server? = false;
+                *server = false;
                 println!("Server future completed");
                 None
             }
         ),
-        connection_result(server)(
+        connection_result(
              {
-                 if *server? {
+                 if *server {
+                    println!("Not time to be client");
                     return None;
                 };
                 println!("not server");
             },
-            async | |{
+            async | _input |{
                 println!("Do client stuff");
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                println!("Done client stuff");
             },
             |connection_result| {
-                *server? = true;
+                *server = true;
                 println!("Client future completed");
                 None
             }
         ),
-        timer(server)(
+        timer(
             {},
-            async | | {
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            async | _input | {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1000)).await;
             },
             |timer| {
                 println!("Timer");

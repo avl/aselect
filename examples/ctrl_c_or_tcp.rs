@@ -1,31 +1,30 @@
-use safeselect::{safe_select, safe_select_context};
+use safeselect::{safe_select};
 use tokio::net::TcpStream;
 use tokio::signal;
 
 #[tokio::main]
 async fn main() {
-    safe_select_context!(State (connection_attempts: u32));
-
+    let connection_attempts = 0u32;
     {
         safe_select!(
-            State,
-            ctrl_c(connection_attempts)(
+            {mutable(connection_attempts);},
+            ctrl_c(
                  {},
-                async | | { signal::ctrl_c().await },
+                async | _fut | { signal::ctrl_c().await },
                 |ctrl_c| {
                     println!(
                         "ctrl-c result: {:?}, after {} attempts",
                         ctrl_c,
-                        *connection_attempts?
+                        *connection_attempts
                     );
                     Some(())
                 }
             ),
-            conn(connection_attempts)(
+            conn(
                  {
-                    *connection_attempts? += 1;
+                    *connection_attempts += 1;
                 },
-                async | | {
+                async | _fut | {
                     let conn = TcpStream::connect(
                         std::env::args()
                             .nth(1)
