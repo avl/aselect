@@ -1,4 +1,4 @@
-# Safe Select
+# ASelect
 
 This is a rust crate intended to provide a solution to two potential pitfalls of the
 tokio `select!`-macro. While said macro is useful, it has two slightly error-prone

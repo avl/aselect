@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use aselect::safe_select;
+use aselect::aselect;
 use std::pin::pin;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -15,7 +15,7 @@ async fn main() {
 
     fn staticer<T: 'static>(_s: &T) {}
 
-    let temp = safe_select!(
+    let temp = aselect!(
         {
             mutable(port, new_conn);
             borrowed(server);

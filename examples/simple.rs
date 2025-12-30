@@ -1,11 +1,11 @@
 use std::pin::pin;
 use futures::StreamExt;
-use aselect::{safe_select};
+use aselect::{aselect};
 
 #[tokio::main]
 async fn main() {
     let counter = 0u32;
-    let mut stream = pin!(safe_select!(
+    let mut stream = pin!(aselect!(
         {
             mutable(counter);
         },

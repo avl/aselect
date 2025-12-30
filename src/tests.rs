@@ -1,7 +1,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use core::pin::pin;
-use crate::{safe_select};
+use crate::{aselect};
 use futures::{Stream, StreamExt};
 use tokio::select;
 use tokio::time::{sleep, timeout, Instant};
@@ -15,7 +15,7 @@ use std::time::Duration;
 async fn minimal_usecase() {
 
     let counter = 0u32;
-    let result = safe_select!(
+    let result = aselect!(
         {
             // Capture variable 'counter'
             mutable(counter);
@@ -40,7 +40,7 @@ async fn minimal_usecase() {
             |time_slept| {
                 // Print value returned from future
                 println!("Slept {:?}", time_slept);
-                // Do not produce a result from the 'safe_select' future.
+                // Do not produce a result from the 'aselect' future.
                 None
             }
         ),
@@ -66,7 +66,7 @@ async fn minimal_usecase() {
 
 #[tokio::test(start_paused = true)]
 async fn repeated_cancellation() {
-    let mut fut = pin!(safe_select!(
+    let mut fut = pin!(aselect!(
         {
         },
         timer1(
@@ -108,7 +108,7 @@ async fn use_all_capture_types() {
     let counter = 0u32;
     let borrowed = "Borrowed".to_string();
     let constant: u32 = 43;
-    let result = safe_select!(
+    let result = aselect!(
         {
             mutable(counter);
             constant(constant);
@@ -158,7 +158,7 @@ async fn test_return_future() {
         let constval = 1;
         let mutval = 2;
         let mutval2 = 2;
-        safe_select!(
+        aselect!(
             {
                 borrowed(value);
                 constant(constval);
@@ -196,7 +196,7 @@ async fn test_no_hang_if_always_ready_and_produce_no_value() {
     let def = "def";
     let ghi = "ghi";
 
-    timeout(Duration::from_millis(10), safe_select!(
+    timeout(Duration::from_millis(10), aselect!(
             {
                 borrowed(abc);
                 constant(def);
@@ -222,7 +222,7 @@ async fn test_no_hang_if_always_ready_and_produce_no_value() {
 #[tokio::test(start_paused = true)]
 async fn test_no_hang_if_all_futures_disabled() {
 
-    timeout(Duration::from_secs(1000), safe_select!(
+    timeout(Duration::from_secs(1000), aselect!(
             {
             },
             conn(

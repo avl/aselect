@@ -2,15 +2,15 @@
 #![deny(missing_docs)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-//! # aelect
+//! # aselect
 //! Wait on multiple branches, without canceling or starving any futures, while allowing
 //! safe access to mutable state. Works in `#[no_std]`, allocates no memory, and has no
 //! non-optional dependencies. Tested with miri.
 //!
 //! ## Background
 //!
-//! This crate implements [`safe_select`], a safer alternative to the tokio `select!`-macro.
-//! By using `safe_select`, it becomes possible to avoid cancelling futures during normal
+//! This crate implements [`aselect`], a safer alternative to the tokio `select!`-macro.
+//! By using `aselect`, it becomes possible to avoid cancelling futures during normal
 //! operations, eliminating a class of bugs. See the excellent RFD 400 from Oxide computer
 //! for a great overview of cancellation safety in rust:
 //! <https://rfd.shared.oxide.computer/rfd/400> .
@@ -23,7 +23,7 @@
 //! * When an arm has completed, while the handler is executing, other arms are no longer
 //!   polled. This can lead to starvation when `select!` is used in a loop.
 //!
-//! In contrast to `select!`, safe_select has these differences:
+//! In contrast to `select!`, aselect has these differences:
 //!  * It implements `futures::Stream`, meaning it can be polled multiple times.
 //!    When polled repeatedly, it never cancels any futures; arms are polled until they
 //!    become ready. It also implements `core::future::Future`.
@@ -31,12 +31,12 @@
 //!  * It has a different syntax (that allows it to be formatted by rustfmt).
 //!
 //! # Implementation
-//! [`safe_select`] works by creating a set of structs that implement a state machine.
+//! [`aselect`] works by creating a set of structs that implement a state machine.
 //! Each select arm is its own struct, and consists of two closures and a stored future.
 //! One of the closures creates the future, and the other decides if the result of a future
-//! should cause `safe_select` itself to produce a value.
+//! should cause `aselect` itself to produce a value.
 //!
-//! `safe_select` does not allocate memory on the heap.
+//! `aselect` does not allocate memory on the heap.
 //!
 //!
 
@@ -287,7 +287,7 @@ macro_rules! borrowed_captures0 {
     ( $temp: ident, $($cap: ident,)*) => {
         $(
             // SAFETY:
-            // Only called from inside `safe_select`-macro, in closures that live shorter
+            // Only called from inside `aselect`-macro, in closures that live shorter
             // than captures.
             // From safety perspective, we do not protect against users calling this
             // hidden macro manually.
@@ -301,7 +301,7 @@ macro_rules! borrowed_captures1 {
     ( $($cap: ident,)*) => {
         $(
             // SAFETY:
-            // Only called from inside `safe_select`-macro, in closures that live shorter
+            // Only called from inside `aselect`-macro, in closures that live shorter
             // than captures.
             // From safety perspective, we do not protect against users calling this
             // hidden macro manually.
@@ -316,7 +316,7 @@ macro_rules! cancelers {
         let mut i = 0;
         $(
             // SAFETY:
-            // Only called from inside `safe_select`-macro, in closures that live shorter
+            // Only called from inside `aselect`-macro, in closures that live shorter
             // than canceler.
             // From safety perspective, we do not protect against users calling this
             // hidden macro manually.
@@ -331,7 +331,7 @@ macro_rules! mutable_captures0 {
     ( $temp: ident, $($cap: ident,)*) => {
         $(
             // SAFETY:
-            // Only called from inside `safe_select`-macro, in closures that live shorter
+            // Only called from inside `aselect`-macro, in closures that live shorter
             // than captures.
             // From safety perspective, we do not protect against users calling this
             // hidden macro manually.
@@ -345,7 +345,7 @@ macro_rules! mutable_captures1 {
     ( $($cap: ident,)*) => {
         $(
             // SAFETY:
-            // Only called from inside `safe_select`-macro, in closures that live shorter
+            // Only called from inside `aselect`-macro, in closures that live shorter
             // than captures.
             // From safety perspective, we do not protect against users calling this
             // hidden macro manually.
@@ -464,7 +464,7 @@ impl Canceler {
     /// The Canceler must not be concurrently accessed.
     pub unsafe fn cancel(&self, index: u32) {
         if index >= 64 {
-            panic!("safe_select only supports canceling the first 64 arms of a safe_select invocation.");
+            panic!("aselect only supports canceling the first 64 arms of a aselect invocation.");
         }
         // Safety:
         // Caller guarantees no concurrent access
@@ -510,13 +510,13 @@ impl CancelerWrapper<'_> {
 ///
 /// Example:
 /// ```rust
-/// use aselect::safe_select;
+/// use aselect::aselect;
 /// # use tokio::time::{sleep, Duration, Instant};
 ///
 /// # #[tokio::main]
 /// # async fn main() {
 /// let counter = 0u32;
-/// let result = safe_select!(
+/// let result = aselect!(
 ///     {
 ///         // Capture variable 'counter'
 ///         mutable(counter);
@@ -542,7 +542,7 @@ impl CancelerWrapper<'_> {
 ///         |time_slept| { // Handler
 ///             // Print value returned from future
 ///             println!("Slept {:?}", time_slept);
-///             // Do not produce a result from the 'safe_select' future.
+///             // Do not produce a result from the 'aselect' future.
 ///             None
 ///         }
 ///     ),
@@ -613,7 +613,7 @@ impl CancelerWrapper<'_> {
 /// parameters, after the initial 'async_input' parameter.
 ///
 /// # Canceling arms
-/// While `safe_select` never automatically cancels arms (unless the whole object is dropped),
+/// While `aselect` never automatically cancels arms (unless the whole object is dropped),
 /// arms can still be canceled explicitly. The syntax for this is slightly obscure:
 ///
 /// ```ignore
@@ -626,15 +626,15 @@ impl CancelerWrapper<'_> {
 /// NOTE! It would be nice if a syntax like `timer1.cancel()` could be used.
 ///
 /// # Cancellation Safety
-/// Dropping the `safe_select` object drops all captured variables and any currently executing
+/// Dropping the `aselect` object drops all captured variables and any currently executing
 /// futures.
 ///
-/// Note, `safe_select` objects can be polled multiple times. Using `safe_select` in a
+/// Note, `aselect` objects can be polled multiple times. Using `aselect` in a
 /// tokio `select!` arm is fine and will not cause any futures to be canceled (unless the
-/// select!-macro takes ownership of `safe_select` and thus drops it on cancellation).
+/// select!-macro takes ownership of `aselect` and thus drops it on cancellation).
 ///
-/// # Precise semantics of safe_select state machine
-/// Every time the `safe_select` macro object is polled, the following is performed:
+/// # Precise semantics of aselect state machine
+/// Every time the `aselect` macro object is polled, the following is performed:
 /// * Each arm is visited in order (top to bottom)
 /// * For each arm:
 ///   * If a future does not exist:
@@ -655,10 +655,10 @@ impl CancelerWrapper<'_> {
 /// has been registered in this case, the future might never be polled again.
 ///
 /// If the above is repeated for more than 10 times, the poll context waker is awoken,
-/// and the poll returns pending. This makes sure `safe_select` does not hang the async
+/// and the poll returns pending. This makes sure `aselect` does not hang the async
 /// runtime. In this condition the current CPU core will be occupied 100%, which may be
 /// undesirable. However, it's possible that this is desired behavior: It would happen,
-/// for example, if `safe_select` is used to copy data between two async streams, and
+/// for example, if `aselect` is used to copy data between two async streams, and
 /// both streams are fast enough that all async operations complete immediately.
 ///
 /// # Pitfalls
@@ -671,19 +671,19 @@ impl CancelerWrapper<'_> {
 ///
 ///
 /// # Panics
-/// `safe_select` does not itself panic. However, user-provided code blocks (setup,
+/// `aselect` does not itself panic. However, user-provided code blocks (setup,
 ///  async_block and handler) can panic. Such panics will unwind out of the safe select
 ///  poll method. Unless the panic is caught at a higher level, of course, the
-/// `safe_select` object is likely to be dropped. But if it is not dropped, any future
-/// that panics *will* be polled again by `safe_select`.
+/// `aselect` object is likely to be dropped. But if it is not dropped, any future
+/// that panics *will* be polled again by `aselect`.
 ///
 /// # Troubleshooting
 ///
-/// Since `safe_select!` is a pure declarative macro, and generates non-trivial code,
+/// Since `aselect!` is a pure declarative macro, and generates non-trivial code,
 /// using it can sometimes result in very bad compilation errors.
 ///
 #[macro_export]
-macro_rules! safe_select {
+macro_rules! aselect {
     (
         {
             $(

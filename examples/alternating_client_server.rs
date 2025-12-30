@@ -1,9 +1,9 @@
-use aselect::{safe_select};
+use aselect::{aselect};
 
 #[tokio::main]
 async fn main() {
     let server = false;
-    safe_select!(
+    aselect!(
         {
             mutable(server);
         },

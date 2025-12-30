@@ -1,4 +1,4 @@
-use aselect::{safe_select};
+use aselect::{aselect};
 use tokio::net::TcpStream;
 use tokio::signal;
 
@@ -6,7 +6,7 @@ use tokio::signal;
 async fn main() {
     let connection_attempts = 0u32;
     {
-        safe_select!(
+        aselect!(
             {mutable(connection_attempts);},
             ctrl_c(
                  {},

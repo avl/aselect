@@ -2,13 +2,13 @@ use std::pin::pin;
 use std::time::Duration;
 use futures::StreamExt;
 use tokio::time::{sleep, Instant};
-use aselect::safe_select;
+use aselect::aselect;
 
 #[tokio::main]
 async fn main() {
 
     let counter = 0u32;
-    let mut stream = pin!(safe_select!(
+    let mut stream = pin!(aselect!(
         {
             // Capture variable 'counter'
             mutable(counter);
@@ -33,7 +33,7 @@ async fn main() {
             |time_slept| {
                 // Print value returned from future
                 println!("Slept {:?}", time_slept);
-                // Do not produce a result from the 'safe_select' future.
+                // Do not produce a result from the 'aselect' future.
                 None
             }
         ),
