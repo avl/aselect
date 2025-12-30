@@ -10,7 +10,7 @@ description = "Opinionated replacement for tokio::select!, avoiding certain pitf
 readme = "../README.md"
 keywords = ["async", "no_std"]
 categories = ["asynchronous", "no-std", "no-std::no-alloc"]
-rust-version = "1.79.0"
+rust-version = "1.89.0"
 
 [lib]
 
