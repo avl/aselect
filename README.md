@@ -19,7 +19,7 @@ This crate solves this by:
 #[tokio::main]
 async fn main() {
     let counter = 0u32;
-    let mut stream = pin!(safe_select!(
+    let mut stream = pin!(aselect!(
         {
             mutable(counter);
         },
@@ -108,7 +108,7 @@ Surely there is a better way!
 # A better way
 
 This crate suggests that futures should never be canceled, except potentially during
-shutdown or as a response to faults. `safe_select!` is a macro that allows writing
+shutdown or as a response to faults. `aselect!` is a macro that allows writing
 select loops that never cancel futures.
 
 

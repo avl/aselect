@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use safeselect::safe_select;
+use aselect::safe_select;
 use std::pin::pin;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

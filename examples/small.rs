@@ -2,7 +2,7 @@ use std::pin::pin;
 use std::time::Duration;
 use futures::StreamExt;
 use tokio::time::{sleep, Instant};
-use safeselect::safe_select;
+use aselect::safe_select;
 
 #[tokio::main]
 async fn main() {

@@ -1,4 +1,4 @@
-use safeselect::{safe_select};
+use aselect::{safe_select};
 
 #[tokio::main]
 async fn main() {

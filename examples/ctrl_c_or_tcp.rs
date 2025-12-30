@@ -1,4 +1,4 @@
-use safeselect::{safe_select};
+use aselect::{safe_select};
 use tokio::net::TcpStream;
 use tokio::signal;
 

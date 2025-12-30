@@ -1,6 +1,6 @@
 use std::pin::pin;
 use futures::StreamExt;
-use safeselect::{safe_select, Output};
+use aselect::{safe_select, Output};
 
 #[tokio::main]
 async fn main() {

@@ -2,7 +2,7 @@
 #![deny(missing_docs)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-//! # Safe Select
+//! # aelect
 //! Wait on multiple branches, without canceling or starving any futures, while allowing
 //! safe access to mutable state. Works in `#[no_std]`, allocates no memory, and has no
 //! non-optional dependencies. Tested with miri.
@@ -510,7 +510,7 @@ impl CancelerWrapper<'_> {
 ///
 /// Example:
 /// ```rust
-/// use safeselect::safe_select;
+/// use aselect::safe_select;
 /// # use tokio::time::{sleep, Duration, Instant};
 ///
 /// # #[tokio::main]
