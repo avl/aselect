@@ -11,13 +11,15 @@ async fn main() {
             ctrl_c(
                  {},
                 async | _fut | { signal::ctrl_c().await },
-                |ctrl_c| {
+                |ctrl_c_result| {
+                    // Cancel the 'conn' arm.
+                    conn.cancel();
                     println!(
                         "ctrl-c result: {:?}, after {} attempts",
-                        ctrl_c,
+                        ctrl_c_result,
                         *connection_attempts
                     );
-                    Some(())
+                    (*connection_attempts > 5).then_some(())
                 }
             ),
             conn(
@@ -25,6 +27,7 @@ async fn main() {
                     *connection_attempts += 1;
                 },
                 async | _fut | {
+                    println!("Reconnecting");
                     let conn = TcpStream::connect(
                         std::env::args()
                             .nth(1)
@@ -43,4 +46,5 @@ async fn main() {
         )
         .await;
     }
+    println!("Done");
 }

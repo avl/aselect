@@ -1,20 +1,70 @@
-pub use futures::Stream;
-use std::cell::UnsafeCell;
-use std::fmt::{Debug, Formatter};
-use std::marker::PhantomData;
-use std::ptr::null_mut;
+#![no_std]
+#![deny(missing_docs)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 
-#[cfg(test)]
+//! # Safe Select
+//! Wait on multiple branches, without canceling or starving any futures, while allowing
+//! safe access to mutable state. Works in `#[no_std]`, allocates no memory, and has no
+//! non-optional dependencies. Tested with miri.
+//!
+//! ## Background
+//!
+//! This crate implements [`safe_select`], a safer alternative to the tokio `select!`-macro.
+//! By using `safe_select`, it becomes possible to avoid cancelling futures during normal
+//! operations, eliminating a class of bugs. See the excellent RFD 400 from Oxide computer
+//! for a great overview of cancellation safety in rust:
+//! <https://rfd.shared.oxide.computer/rfd/400> .
+//!
+//! ### Comparison with tokio::select
+//! The regular `select!` macro from tokio is very useful, but it has two properties that can
+//! be error-prone:
+//! * As soon as one select arm completes, all other arms are canceled. Many futures are
+//!   not cancellation safe (e.g. `tokio::sync::mpsc::Sender::send`).
+//! * When an arm has completed, while the handler is executing, other arms are no longer
+//!   polled. This can lead to starvation when `select!` is used in a loop.
+//!
+//! In contrast to `select!`, safe_select has these differences:
+//!  * It implements `futures::Stream`, meaning it can be polled multiple times.
+//!    When polled repeatedly, it never cancels any futures; arms are polled until they
+//!    become ready. It also implements `core::future::Future`.
+//!  * When polled, it *always* polls all active arms.
+//!  * It has a different syntax (that allows it to be formatted by rustfmt).
+//!
+//! # Implementation
+//! [`safe_select`] works by creating a set of structs that implement a state machine.
+//! Each select arm is its own struct, and consists of two closures and a stored future.
+//! One of the closures creates the future, and the other decides if the result of a future
+//! should cause `safe_select` itself to produce a value.
+//!
+//! `safe_select` does not allocate memory on the heap.
+//!
+//!
+
+use core::cell::UnsafeCell;
+use core::fmt::{Debug, Formatter};
+use core::marker::PhantomData;
+use core::ptr::null_mut;
+
+#[cfg(feature = "futures")]
+pub use futures::Stream;
+
+#[cfg(feature = "std")]
+extern crate std;
+
+#[cfg(all(feature = "std", test))]
 mod tests;
 
+#[doc(hidden)]
 pub trait NewFactory<'a, CTX, TOut> {
     /// Returns Some if user code was run
     /// If it was ready, it may have produced a value `Some(Some(_))` or not `Some(None)`.
     /// It is guaranteed that if this method has run user-code, it returns Some.
     /// If the future was not ready, and no user code was run, `None` is returned.
-    fn do_poll(&mut self, ctx: &'a CTX, cx: &mut ::std::task::Context<'_>) -> PollResult<TOut>;
+    fn do_poll(&mut self, ctx: &'a CTX, cx: &mut ::core::task::Context<'_>, canceler: &mut Canceler) -> PollResult<TOut>;
+    fn cancel(&mut self);
 }
 
+#[doc(hidden)]
 pub struct UnsafeCapture<'a, T: 'a> {
     value: UnsafeCell<T>,
     phantom: PhantomData<&'a ()>,
@@ -27,19 +77,24 @@ impl<'a, T: 'a> UnsafeCapture<'a, T> {
             phantom: PhantomData,
         }
     }
+    /// # Safety
+    /// The underlying captured value must still be alive, and
+    /// must be mutably accessible without causing aliasing.
     pub unsafe fn access(&self) -> UnsafeCaptureAccess<T> {
-        UnsafeCaptureAccess { value: self.value.get() }
+        UnsafeCaptureAccess {
+            value: self.value.get(),
+        }
     }
 }
 
-
+#[doc(hidden)]
 pub struct LockedCapture<'a, T: 'a> {
     locks: UnsafeCell<bool>,
     value: UnsafeCell<T>,
     phantom: PhantomData<&'a ()>,
 }
 impl<'a, T: Debug> Debug for LockedCapture<'a, T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> ::core::fmt::Result {
         write!(f, "Borrowed()")
     }
 }
@@ -51,7 +106,13 @@ impl<'a, T: 'a> LockedCapture<'a, T> {
             phantom: PhantomData,
         }
     }
+    /// # Safety
+    /// The underlying captured value must still be alive, and
+    /// must be mutably accessible without causing aliasing, and
+    /// also no concurrent access to the lock must be allowed.
     pub unsafe fn access(&self) -> CaptureAccess<T> {
+        // SAFETY:
+        // No concurrent access to lock, guaranteed by caller
         if unsafe { !*self.locks.get() } {
             CaptureAccess {
                 value: self.value.get(),
@@ -62,31 +123,45 @@ impl<'a, T: 'a> LockedCapture<'a, T> {
     }
 }
 
+#[doc(hidden)]
 pub struct CaptureAccess<T> {
     value: *mut T,
 }
 
 impl<T> CaptureAccess<T> {
+    /// # Safety
+    /// The underlying captured value must still be alive, and
+    /// must be mutably accessible without causing aliasing.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn get(&self) -> Option<&'_ mut T> {
         if self.value.is_null() {
             None
         } else {
+            // SAFETY:
+            // Caller guarantees captured value is still alive
             Some(unsafe { &mut *self.value })
         }
     }
 }
 
+#[doc(hidden)]
 pub struct UnsafeCaptureAccess<T> {
     value: *mut T,
 }
 
 impl<T> UnsafeCaptureAccess<T> {
+    /// # Safety
+    /// The underlying captured value must still be alive, and
+    /// must be mutably accessible without causing aliasing.
+    #[allow(clippy::mut_from_ref)]
     pub unsafe fn get(&self) -> &'_ mut T {
+        // SAFETY:
+        // Caller guarantees captured value is still alive
         unsafe { &mut *self.value }
     }
 }
 
-
+#[doc(hidden)]
 pub struct CaptureGuard<'a, T> {
     lock: &'a UnsafeCell<bool>,
     #[doc(hidden)]
@@ -97,7 +172,7 @@ impl<'a, T> Debug for CaptureGuard<'a, T>
 where
     T: Debug,
 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> ::core::fmt::Result {
         write!(f, "CaptureGuard({:?})", self.value)
     }
 }
@@ -106,14 +181,27 @@ impl<'a, T> CaptureGuard<'a, T>
 where
     T: Debug,
 {
+    /// # Safety
+    /// The underlying captured value must still be alive, and
+    /// must be mutably accessible without causing aliasing.
     pub unsafe fn get_mut(&mut self) -> &mut T {
+        // SAFETY:
+        // Caller guarantees captured value is still alive
         unsafe { &mut *self.value }
     }
 }
 
 impl<'a, T: 'a> LockedCapture<'a, T> {
+    /// # Safety
+    /// The underlying captured value must still be alive, and
+    /// must be mutably accessible without causing aliasing, and
+    /// also no concurrent access to the lock must be allowed.
+    /// Lock must only be accessed from this thread, and must
+    /// stay alive for as long as `CaptureGuard` stays alive.
     #[doc(hidden)]
     pub unsafe fn lock(&self) -> Option<CaptureGuard<'_, T>> {
+        // SAFETY:
+        // Caller guarantees locks is not aliased.
         let locks = unsafe { &mut *self.locks.get() };
         if *locks {
             return None;
@@ -121,6 +209,8 @@ impl<'a, T: 'a> LockedCapture<'a, T> {
         *locks = true;
         Some(CaptureGuard {
             lock: &self.locks,
+            // SAFETY:
+            // Caller guarantees captured value is still alive
             value: unsafe { &mut *(self.value.get()) },
         })
     }
@@ -128,153 +218,137 @@ impl<'a, T: 'a> LockedCapture<'a, T> {
 
 impl<T> Drop for CaptureGuard<'_, T> {
     fn drop(&mut self) {
+        // SAFETY:
+        // CaptureGuard instances are only creatable in this module, and are only created
+        // by `LockedCapture::lock`. This method guarantees `lock` stays alive.
         unsafe { *self.lock.get() = false }
     }
 }
 
-#[macro_export]
-macro_rules! ord_cap2 {
-    ($typname: ident, $($cap:ident)*) => {
-        $crate::ord_cap2!($typname, inner 0, parsed $($cap)*)
-    };
-    ($typname: ident, inner $depth:expr, $(($cap0:ident, $count:expr))* parsed $cap:ident $($cap1:ident)*) => {
-        $crate::ord_cap2!($typname, inner ($depth + 1), $(($cap0, $count) )* ($cap, $depth) parsed $($cap1)* )
-    };
-
-    ($typname: ident, inner $depth:expr, $(($cap:ident, $count:expr))* parsed) => {
-
-        $typname {
-            $($cap: $crate::LockedCapture::new($cap, ($count)), )*
-        }
-
-    };
-}
-
-/// A small helper macro to expand a sequence of expressions and statements.
-///
-// TODO: Is this _really_ needed? Can't we inject our variables in an outer scope?
-#[macro_export]
-macro_rules! expand_arbitrary {
-    () => {
-
-    };
-    ( ($e:expr) $($tail:tt)* ) => {
-        $e
-        expand_arbitrary!( $($tail)* )
-    };
-    ( ($e:stmt) $( $tail:tt)* ) => {
-        $e
-        expand_arbitrary!( $($tail)* )
-    };
-}
-
+#[doc(hidden)]
 pub trait SafeResult {
     type Output;
-    fn result(self) -> Option<Self::Output>;
+    /// Some(Some(x)) - return value
+    /// Some(None) - end stream
+    /// None - pending
+    fn result(self) -> Option<Option<Self::Output>>;
 }
-pub fn result<T: SafeResult>(input: Option<T>) -> Option<T::Output> {
+
+/// Marker type to signal that the stream is to be terminated.
+pub struct Terminate<R>(PhantomData<R>);
+
+
+#[doc(hidden)]
+pub enum Output<R> {
+    Pending,
+    Value(R),
+    Terminate
+}
+
+
+/// Terminate the stream
+pub fn terminate<R>() -> Output<R> {
+    Output::Terminate
+}
+
+#[doc(hidden)]
+pub fn result<T: SafeResult>(input: Option<T>) -> Option<Option<T::Output>> {
     input?.result()
 }
 impl<R> SafeResult for Option<R> {
     type Output = R;
 
-    fn result(self) -> Option<Self::Output> {
-        Some(self?)
+    fn result(self) -> Option<Option<Self::Output>> {
+        Some(Some(self?))
+    }
+}
+impl<R> SafeResult for Output<R> {
+    type Output = R;
+
+    fn result(self) -> Option<Option<Self::Output>> {
+        match self {
+            Output::Pending => None,
+            Output::Value(v) => Some(Some(v)),
+            Output::Terminate => Some(None),
+        }
+
     }
 }
 impl SafeResult for () {
     type Output = ();
-    fn result(self) -> Option<Self::Output> {
+    fn result(self) -> Option<Option<Self::Output>> {
         None
     }
 }
 
-/*
-end goal
-
-safe_select2!(
-    captures(mut a,const b,exclusive c),
-    {
-        // setup
-        *a = 5;
-        // Optionally return reusable state
-        *a + 1
-    },
-    |time,c|{
-        tokio::sleep(time).await;
-        tokio::sleep(*a).await;
-        *c = 42;
-        // produce result
-        42
-    },
-    |result|{
-        *a = 47;
-        Some("yielded value".to_string())
-    }
-)
-
-*/
-
-#[macro_export]
-macro_rules! safe_select2 {
-    (
-        constant($($constcap:ident),*),
-        mutable($($mutcap:ident),*),
-        exclusive($($excap:ident),*),
-
-    $( $name: ident( $body: expr, async |$fut_input:ident $(,$excap0:ident)*| $body1: expr, |$result:ident| $handler_body: expr)  ),* $(,)? ) => {
-        //$crate::safe_select!(inner $contextname, $contexttype, $($name  ( |$($cap0),*|  {$($body0 ;)*}, async |$($cap1),*| $body1, |$result| $handler_body), )*)
-
-        {
-            struct ConstState<$($constcap),*> {
-                $($constcap: $constcap,)*
-            }
-            struct State<$($constcap),*> {
-                const_state: ConstState<$($constcap),*>,
-
-            }
-
-
-
-
-
-        }
-
-
-    };
-}
-
-
+#[doc(hidden)]
 #[macro_export]
 macro_rules! borrowed_captures0 {
     ( $temp: ident, $($cap: ident,)*) => {
         $(
+            // SAFETY:
+            // Only called from inside `safe_select`-macro, in closures that live shorter
+            // than captures.
+            // From safety perspective, we do not protect against users calling this
+            // hidden macro manually.
             let $cap = unsafe { $temp.$cap.access()};
         )*
     };
 }
+#[doc(hidden)]
 #[macro_export]
 macro_rules! borrowed_captures1 {
     ( $($cap: ident,)*) => {
         $(
+            // SAFETY:
+            // Only called from inside `safe_select`-macro, in closures that live shorter
+            // than captures.
+            // From safety perspective, we do not protect against users calling this
+            // hidden macro manually.
             let mut $cap = unsafe { $cap.get() };
         )*
     };
 }
-
-
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cancelers {
+    ( $canceler: ident, $($arm_name: ident,)*) => {
+        let mut i = 0;
+        $(
+            // SAFETY:
+            // Only called from inside `safe_select`-macro, in closures that live shorter
+            // than canceler.
+            // From safety perspective, we do not protect against users calling this
+            // hidden macro manually.
+            let mut $arm_name = unsafe { $crate::CancelerWrapper::new($canceler, i) };
+            i+=1;
+        )*
+    };
+}
+#[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures0 {
     ( $temp: ident, $($cap: ident,)*) => {
         $(
+            // SAFETY:
+            // Only called from inside `safe_select`-macro, in closures that live shorter
+            // than captures.
+            // From safety perspective, we do not protect against users calling this
+            // hidden macro manually.
             let $cap = unsafe { $temp.$cap.access()};
         )*
     };
 }
+#[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures1 {
     ( $($cap: ident,)*) => {
         $(
+            // SAFETY:
+            // Only called from inside `safe_select`-macro, in closures that live shorter
+            // than captures.
+            // From safety perspective, we do not protect against users calling this
+            // hidden macro manually.
             let mut $cap = unsafe { $cap.get() };
         )*
     };
@@ -289,9 +363,11 @@ macro_rules! mutable_captures1 {
 /// The reason for this limitation is that multiple async blocks can execute
 /// concurrently, and the semantics of mutable references in rust forbid concurrent
 /// access.
-#[derive(Clone,Copy,Debug)]
+#[derive(Clone, Copy, Debug)]
+#[doc(hidden)]
 pub struct MutableValueUnavailableInThisAsyncContext;
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures2 {
     ( $($cap: ident,)*) => {
@@ -301,6 +377,7 @@ macro_rules! mutable_captures2 {
     };
 }
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! constant_captures0 {
     ( $temp: ident, $($cap: ident,)*) => {
@@ -310,34 +387,338 @@ macro_rules! constant_captures0 {
     };
 }
 
+#[doc(hidden)]
+#[macro_export]
+#[cfg(feature = "futures")]
+macro_rules! define_stream_impl {
+    ($($name:ident),*) => {
+            #[allow(nonstandard_style)]
+            impl<'a, TCap, TOut, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TCap, TOut, $($name),*> where
+                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            {
+                type Item = TOut;
+                fn poll_next(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<Self::Item>> {
+                    match self.poll_stream_impl(cx) {
+                        ::core::task::Poll::Ready(val) => ::core::task::Poll::Ready(val),
+                        _ => ::core::task::Poll::Pending,
+                    }
+                }
+            }
 
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+#[cfg(not(feature = "futures"))]
+macro_rules! define_stream_impl {
+    ($($name:ident),*) => {};
+}
+
+#[doc(hidden)]
 pub enum PollResult<T> {
     Result(T),
-    Pending,
+    Pending(bool/*future created*/),
     /// Future ran to completion, but no output value was produced
     Inhibited,
-    Disabled
+    Disabled,
+    EndStream
 }
 
 
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct Canceler {
+    #[doc(hidden)]
+    pub canceled: UnsafeCell<u64>,
+}
+impl Canceler {
+    #[doc(hidden)]
+    pub fn new() -> Canceler {
+        Canceler { canceled: UnsafeCell::new(0) }
+    }
+
+    /// # Safety
+    /// No concurrent access must occur
+    #[doc(hidden)]
+    pub unsafe fn any(&self) -> bool {
+        // Safety:
+        // Caller guarantees no concurrent access
+        (unsafe {*self.canceled.get()}) != 0
+    }
+
+    /// # Safety
+    /// No concurrent access must occur
+    #[doc(hidden)]
+    pub unsafe fn canceled(&self, i: u32) -> bool {
+        // Safety:
+        // Caller guarantees no concurrent access
+        (unsafe {*self.canceled.get()} & (1<<i)) != 0
+    }
+
+    /// Cancel the select arm with the given index.
+    ///
+    /// The first arm has index 0, arms are then numbered consecutively.
+    ///
+    /// # Safety
+    /// The Canceler must not be concurrently accessed.
+    pub unsafe fn cancel(&self, index: u32) {
+        if index >= 64 {
+            panic!("safe_select only supports canceling the first 64 arms of a safe_select invocation.");
+        }
+        // Safety:
+        // Caller guarantees no concurrent access
+        let val = unsafe { &mut *self.canceled.get()};
+         *val |=  1 << index;
+    }
+}
+
+
+#[doc(hidden)]
+pub struct CancelerWrapper<'a>  {
+    canceler: &'a Canceler,
+    index: u32,
+}
+
+
+
+impl Debug for CancelerWrapper<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Canceler")
+    }
+}
+
+impl CancelerWrapper<'_> {
+    // # Safety
+    // Canceler must not be accessed from other threads
+    pub unsafe fn new(canceler: &Canceler, index: u32) -> CancelerWrapper<'_> {
+        CancelerWrapper { canceler, index }
+    }
+    pub fn cancel(&mut self) {
+        // Safety:
+        // CancelerWrapper not constructable in safe code. All constructors
+        // promise that `self.canceler` is not accessed concurrently.
+        unsafe {
+            self.canceler.cancel(self.index);
+        }
+    }
+}
+
+
+/// Evaluate multiple different async operations concurrently.
+///
+///
+/// Example:
+/// ```rust
+/// use safeselect::safe_select;
+/// # use tokio::time::{sleep, Duration, Instant};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let counter = 0u32;
+/// let result = safe_select!(
+///     {
+///         // Capture variable 'counter'
+///         mutable(counter);
+///     },
+///     // First select arm. A unique name for each arm must be provided (`timer1`).
+///     // Sleeps 0.3 seconds, over and over.
+///     timer1(
+///         { // Setup
+///
+///             // Print value of counter, then increment
+///             println!("Counter = {:?}", counter);
+///             *counter += 1;
+///             // Create a future. Will be available to async block below.
+///             sleep(Duration::from_millis(300))
+///         },
+///         async |sleep| { // Async block
+///             // 'sleep' is the future created above
+///             let sleep_start = Instant::now();
+///             sleep.await;
+///             // Value returned by this async block is given to block below
+///             sleep_start.elapsed()
+///         },
+///         |time_slept| { // Handler
+///             // Print value returned from future
+///             println!("Slept {:?}", time_slept);
+///             // Do not produce a result from the 'safe_select' future.
+///             None
+///         }
+///     ),
+///     // Second select arm.
+///     // Sleeps 1 second, then produces a value.
+///     timer2(
+///         { // Setup
+///             // Similar to above, but now sleep 10 seconds
+///             tokio::time::sleep(tokio::time::Duration::from_secs(1))
+///         },
+///         async |sleep| { // Async block
+///             sleep.await;
+///         },
+///         |time_slept| { // Handler
+///             println!("Timer 2 done");
+///             // After the 10 seconds have elapsed,
+///             Some("finished")
+///         }
+///     ),
+/// ).await;
+/// println!("Produced value: {}", result);
+/// # }
+/// ```
+/// The above prints:
+/// ```plaintext
+/// Counter = 0
+/// Slept 300ms
+/// Counter = 1
+/// Slept 300ms
+/// Counter = 2
+/// Slept 300ms
+/// Counter = 3
+/// Timer 2 done
+/// Produced value: finished
+/// ```
+///
+/// ## Enabling/disabling arms
+/// The setup block returns an Option. The whole setup expression is invisibly wrapped in
+/// `Some(..)`, so this is not immediately obvious. By returning `None` from the setup block,
+/// the arm can be disabled. The setup-block is re-evaluated whenever any arm completes.
+///
+/// ## Captures
+/// Variables can be captured for use within the three blocks: setup, async_block and
+/// handler.
+///
+/// There are three types of capture:
+///
+///  * `constant`: Capture is available in all three blocks, for every arm. Captured variable
+///    is immutable.
+///  * `mutable`: Capture is available in setup and handler only. Captured variable is mutable.
+///  * `borrowed`: Capture is available in all three blocks. The variable can be borrowed by
+///    exactly one async_block (at any instant). In setup and handler, borrowed variables
+///    are wrapped in an `Option`. If a variable is currently borrowed by another async block,
+///    the `Option` is `None`. When a `borrowed` variable is used in an async block, the block
+///    will not run if the variable is currently borrowed by another async block.
+///
+/// All these capture mechanisms always take ownership. Ownership is retained in the
+/// select object. At present, there is no built-in way to move the captured variables out of the
+/// object.
+///
+/// # Data flow
+/// The setup block expression has access to all captures. The value it evaluates to is
+/// forwarded as the first input to the async block. The async block is evaluated, and when it
+/// becomes ready, its value is provided to the handler.
+///
+/// The async block always requires at least one parameter. Each async block can
+/// capture an arbitrary number of `borrowed` capture variables by listing them as further
+/// parameters, after the initial 'async_input' parameter.
+///
+/// # Canceling arms
+/// While `safe_select` never automatically cancels arms (unless the whole object is dropped),
+/// arms can still be canceled explicitly. The syntax for this is slightly obscure:
+///
+/// ```ignore
+/// timer1.cancel(1);
+/// ```
+/// The above call will cancel the arm with index 1. The indexing starts at 0.
+/// In the example above, this would be the second arm, the one labeled `timer2`.
+/// Canceled arms will immediately restart, unless their setup code disables them.
+///
+/// NOTE! It would be nice if a syntax like `timer1.cancel()` could be used.
+///
+/// # Cancellation Safety
+/// Dropping the `safe_select` object drops all captured variables and any currently executing
+/// futures.
+///
+/// Note, `safe_select` objects can be polled multiple times. Using `safe_select` in a
+/// tokio `select!` arm is fine and will not cause any futures to be canceled (unless the
+/// select!-macro takes ownership of `safe_select` and thus drops it on cancellation).
+///
+/// # Precise semantics of safe_select state machine
+/// Every time the `safe_select` macro object is polled, the following is performed:
+/// * Each arm is visited in order (top to bottom)
+/// * For each arm:
+///   * If a future does not exist:
+///     * Evaluate the `setup` block.
+///     * If this results in a future: Store the future.
+///   * Poll any stored future
+///     * If the future is ready, and produced a value: Return the value to the callee.
+///     * If the future is pending: Disable the arm for the duration of this poll.
+/// * Repeat above until all the following conditions are satisfied:
+///   * No setup code block produced a new future (this condition exists to ensure any
+///     side effects of creating a new future are visible to other setup blocks).
+///
+/// It is expected that user code normally satisfies the halt condition within one or two
+/// iterations. A failure to do so is possibly a programming error: Either all the arms
+/// have been disabled, or futures keep being ready without producing any output.
+///
+/// If all arms have been disabled, the future will be pending forever. Since no waker
+/// has been registered in this case, the future might never be polled again.
+///
+/// If the above is repeated for more than 10 times, the poll context waker is awoken,
+/// and the poll returns pending. This makes sure `safe_select` does not hang the async
+/// runtime. In this condition the current CPU core will be occupied 100%, which may be
+/// undesirable. However, it's possible that this is desired behavior: It would happen,
+/// for example, if `safe_select` is used to copy data between two async streams, and
+/// both streams are fast enough that all async operations complete immediately.
+///
+/// # Pitfalls
+/// Some things to watch out for:
+///  * Make sure at least one arm always yields a pending future. Disabling all arms will
+///    sleep forever, which is likely a programming error.
+///  * If multiple futures attempt to borrow the same capture of type `borrowed`,
+///    only one of them will actually be constructed. The other(s) will be disabled.
+///
+///
+///
+/// # Panics
+/// `safe_select` does not itself panic. However, user-provided code blocks (setup,
+///  async_block and handler) can panic. Such panics will unwind out of the safe select
+///  poll method. Unless the panic is caught at a higher level, of course, the
+/// `safe_select` object is likely to be dropped. But if it is not dropped, any future
+/// that panics *will* be polled again by `safe_select`.
+///
+/// # Troubleshooting
+///
+/// Since `safe_select!` is a pure declarative macro, and generates non-trivial code,
+/// using it can sometimes result in very bad compilation errors.
+///
 #[macro_export]
 macro_rules! safe_select {
-    ( {$( $(constant($($const_cap:ident),*))? $(mutable($($mutable_cap:ident),*))? $(borrowed($($excl_cap:ident),*))? ; )* }, $( $name: ident( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
-        $crate::safe_select!(inner constant($($($($const_cap,)*)*)*), mutable($($($($mutable_cap,)*)*)*), borrowed($($($($excl_cap,)*)*)*), temp, $crate::constant_captures0!(temp, $($($($const_cap,)*)*)*), $crate::mutable_captures0!(temp, $($($($mutable_cap,)*)*)*), $crate::mutable_captures1!($($($($mutable_cap,)*)*)*), $crate::mutable_captures2!($($($($mutable_cap,)*)*)*), $crate::borrowed_captures0!(temp, $($($($excl_cap,)*)*)*), $crate::borrowed_captures1!($($($($excl_cap,)*)*)*), $($name  ( $body0 , async |$fut_input $(,$cap1)*| $body1, |$result| $handler_body), )*)
+    (
+        {
+            $(
+                $(constant($($const_capture:ident),*))?
+                $(mutable($($mutable_capture:ident),*))?
+                $(borrowed($($borrowed_capture:ident),*))?;
+            )*
+        }$(,)?
+        $( $arm_name: ident(
+            $setup: expr,
+            async |$async_input:ident $(,$borrow:ident)*| $async_block: expr,
+            |$async_result:ident| $handler: expr
+        )$(,)?  )*
+    ) => {
+        $crate::safe_select_impl!(inner constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*), $crate::mutable_captures0!(temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!($($($($mutable_capture,)*)*)*), $crate::mutable_captures2!($($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!($($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
     };
-    ( inner constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($excl_cap:ident,)*), $temp: ident, $const_captures0:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! safe_select_impl {
+    ( inner constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($excl_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
 
         {
             #[allow(nonstandard_style)]
-            pub struct Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*> {
-                phantom: ::std::marker::PhantomData<&'a()>,
+            #[allow(unused)]
+            struct Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*> {
+                phantom: ::core::marker::PhantomData<&'a()>,
                 $($excl_cap: $crate::LockedCapture<'a, $excl_cap>, )*
                 $($mutable_cap: $crate::UnsafeCapture<'a, $mutable_cap>, )*
                 $($const_cap: $const_cap, )*
             }
 
             let context = Context {
-                phantom: ::std::marker::PhantomData,
+                phantom: ::core::marker::PhantomData,
                 $($excl_cap: $crate::LockedCapture::new($excl_cap), )*
                 $($mutable_cap: $crate::UnsafeCapture::new($mutable_cap), )*
                 $($const_cap: $const_cap, )*
@@ -345,68 +726,80 @@ macro_rules! safe_select {
 
             $(
                 #[allow(nonstandard_style)]
+                #[allow(unused)]
                 struct $name<'a, R, TOut, TCap:'a, TFun, TDecide> where
-                    TFun: FnMut(&'a TCap) -> Option<R>,
-                    R: Future+'a,
-                    TDecide: FnMut(&'a TCap, R::Output) -> Option<TOut>,
+                    TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
+                    R: ::core::future::Future+'a,
+                    TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<Option<TOut>>,
 
                 {
                     fun: TFun,
                     fut: Option<R>,
                     decide: TDecide,
-                    phantom_cap: ::std::marker::PhantomData<&'a TCap>,
+                    phantom_cap: ::core::marker::PhantomData<&'a TCap>,
                 }
 
                 /// Return Some if future was ready (and thus must be recreated before next iteration)
                 /// Return Some(Some(_)) if it also produced a value
                 #[allow(nonstandard_style)]
                 impl<'a, R, TOut, TCap:'a, TFun,TDecide> $crate::NewFactory<'a, TCap, TOut> for $name<'a, R, TOut, TCap, TFun, TDecide> where
-                    TFun: FnMut(&'a TCap) -> Option<R>,
-                    R: Future+'a,
-                    TDecide: FnMut(&'a TCap, R::Output) -> Option<TOut>,
+                    TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
+                    R: ::core::future::Future+'a,
+                    TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<Option<TOut>>,
                 {
 
+                    fn cancel(&mut self) {
+                        self.fut = None;
+                    }
 
-                    fn do_poll(&mut self, ctx: &'a TCap, cx: &mut ::std::task::Context<'_>) -> $crate::PollResult<TOut> {
-                        loop {
-                            if self.fut.is_none() {
-                                if let Some(fut) = (self.fun)(ctx) {
-                                    self.fut = Some(fut);
-                                } else {
-                                    return $crate::PollResult::Disabled;
-                                }
-                            }
-
-                            let fut = self.fut.as_mut().unwrap();
-                            match unsafe { ::std::pin::Pin::new_unchecked(fut) }.poll(cx) {
-                                ::std::task::Poll::Ready(out) => {
-                                    self.fut = None;
-                                    match (self.decide)(ctx, out) {
-                                        Some(c) => {
-                                            return $crate::PollResult::Result(c);
-                                        }
-                                        _ => {
-                                            return $crate::PollResult::Inhibited;
-                                        }
-                                    }
-                                }
-                                ::std::task::Poll::Pending => {
-                                    return $crate::PollResult::Pending;
-                                },
+                    fn do_poll(&mut self, ctx: &'a TCap, cx: &mut ::core::task::Context<'_>, canceler: &mut $crate::Canceler) -> $crate::PollResult<TOut> {
+                        let mut future_created = false;
+                        if self.fut.is_none() {
+                            if let Some(fut) = (self.fun)(ctx, canceler) {
+                                self.fut = Some(fut);
+                                future_created = true;
+                            } else {
+                                return $crate::PollResult::Disabled;
                             }
                         }
+
+                        let fut = self.fut.as_mut().unwrap();
+                        // SAFETY:
+                        // `do_poll` is not public. `Self` is in fact always pinned.
+                        match unsafe { ::core::pin::Pin::new_unchecked(fut) }.poll(cx) {
+                            ::core::task::Poll::Ready(out) => {
+                                self.fut = None;
+                                match (self.decide)(ctx, out, canceler) {
+                                    Some(Some(c)) => {
+                                        return $crate::PollResult::Result(c);
+                                    }
+                                    Some(None) => {
+                                        return $crate::PollResult::EndStream;
+                                    }
+                                    _ => {
+                                        return $crate::PollResult::Inhibited;
+                                    }
+                                }
+                            }
+                            ::core::task::Poll::Pending => {
+                                return $crate::PollResult::Pending(future_created);
+                            },
+                        }
+
                     }
                 }
             )*
 
             #[allow(nonstandard_style)]
-            pub struct __SafeSelectImpl<'a, TCap:'a, TOut, $($name),*>
+            #[allow(unused)]
+            struct __SafeSelectImpl<'a, TCap:'a, TOut, $($name),*>
             {
                 context: TCap,
-                $($name: $name,)*
-                phantom: ::std::marker::PhantomData<&'a TOut>,
                 #[allow(unused)]
-                phantom_pinned: ::std::marker::PhantomPinned
+                $($name: $name,)*
+                phantom: ::core::marker::PhantomData<&'a TOut>,
+                #[allow(unused)]
+                phantom_pinned: ::core::marker::PhantomPinned
             }
 
             #[allow(nonstandard_style)]
@@ -414,14 +807,17 @@ macro_rules! safe_select {
                 $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
             {
 
-                fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<TOut>> {
+                fn poll_next(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<TOut>> {
+                    // SAFETY:
+                    // We do not move out of this.
                     let this = unsafe { self.get_unchecked_mut() };
 
 
                     const TOTCOUNT: usize = const {
                         let mut totcount = 0;
                         $(
-                            struct $name;
+                            #[allow(unused)]
+                            let $name = ();
                             totcount += 1;
                         )*
                         totcount
@@ -431,12 +827,7 @@ macro_rules! safe_select {
 
                     let cap_ptr = (&this.context) as *const _;
                     let mut iteration_count = 0;
-                    // True if at least one future has been polled and returned pending.
-                    // This means that a waker has been registered, and we can return pending
-                    // without risking starvation. Note however that all arms must be given
-                    // a chance to produce and poll a future, otherwise futures will never actually
-                    // run concurrently.
-                    let mut have_any_waiter = false;
+                    #[allow(unused_assignments)]
                     loop {
                         // True if all arms are okay with yielding. I.e, thy haven't just
                         // returned pending (in which case other arms may have to be polled),
@@ -444,15 +835,20 @@ macro_rules! safe_select {
                         // polled again).
                         let mut can_yield = true;
                         let mut i = 0;
+                        let mut canceler = $crate::Canceler::new();
                         $(
                             if runnable[i] {
-                                match this.$name.do_poll(unsafe{&*cap_ptr}, cx){
+                                match this.$name.do_poll(unsafe{&*cap_ptr}, cx, &mut canceler){
                                     $crate::PollResult::Result(out) => {
-                                        return ::std::task::Poll::Ready(Some(out));
+                                        return ::core::task::Poll::Ready(Some(out));
                                     }
-                                    $crate::PollResult::Pending => {
-                                        can_yield = false;
-                                        have_any_waiter = true;
+                                    $crate::PollResult::EndStream => {
+                                        return ::core::task::Poll::Ready(None);
+                                    }
+                                    $crate::PollResult::Pending(future_created) => {
+                                        if future_created {
+                                            can_yield = false;
+                                        }
                                         runnable[i] = false;
                                     }
                                     $crate::PollResult::Disabled => {
@@ -464,56 +860,73 @@ macro_rules! safe_select {
                             }
                             i += 1;
                         )*
+                        // SAFETY:
+                        // Only a single thread executes poll on this future. This is guaranteed
+                        // because we take the future by `Pin<&mut Self`
+                        if unsafe { canceler.any() } {
+                            can_yield = false;
+                            let mut i = 0;
+                            $(
+                                // SAFETY:
+                                // Only a single thread executes poll on this future. This is guaranteed
+                                // because we take the future by `Pin<&mut Self`
+                                if unsafe { canceler.canceled(i as u32) } {
+                                    this.$name.cancel();
+                                    runnable[i] = true;
+                                }
+                                i += 1;
+                            )*
+                        }
                         iteration_count += 1;
-                        if can_yield && have_any_waiter {
-                            return ::std::task::Poll::Pending;
+                        if can_yield {
+                            return ::core::task::Poll::Pending;
                         }
-                        if iteration_count > 1000 {
-                            panic!("Too many iterations with neither pending futures nor a value produced");
+                        if iteration_count > 10 {
+                            cx.waker().wake_by_ref();
+                            return ::core::task::Poll::Pending;
                         }
-
                     }
                 }
             }
-
 
             #[allow(nonstandard_style)]
             impl<'a, TCap, TOut, $($name),*> __SafeSelectImpl<'a, TCap, TOut,  $($name),*> where
                 $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
             {
-                fn poll_impl(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<TOut> {
+                fn poll_impl(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<TOut> {
                     match self.poll_next(cx) {
-                        ::std::task::Poll::Ready(Some(val)) => ::std::task::Poll::Ready(val),
-                        _ => ::std::task::Poll::Pending,
+                        ::core::task::Poll::Ready(Some(val)) => ::core::task::Poll::Ready(val),
+                        _ => ::core::task::Poll::Pending,
                     }
                 }
             }
 
             #[allow(nonstandard_style)]
-            fn unify_fut<'a, R: 'a $(,$const_cap:'a)* $(,$mutable_cap:'a)* $(,$excl_cap:'a)*, F: FnMut(&'a Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>) -> R>(_hint: *const Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, func: F) -> F {
+            impl<'a, TCap, TOut, $($name),*> __SafeSelectImpl<'a, TCap, TOut,  $($name),*> where
+                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            {
+                fn poll_stream_impl(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<TOut>> {
+                    match self.poll_next(cx) {
+                        ::core::task::Poll::Ready(val) => ::core::task::Poll::Ready(val),
+                        _ => ::core::task::Poll::Pending,
+                    }
+                }
+            }
+
+            #[allow(nonstandard_style)]
+            fn unify_fut<'a, R: 'a $(,$const_cap:'a)* $(,$mutable_cap:'a)* $(,$excl_cap:'a)*, F: FnMut(&'a Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, &mut $crate::Canceler) -> R>(_hint: *const Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, func: F) -> F {
                 func
             }
 
 
-            #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TCap, TOut, $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
-            {
-                type Item = TOut;
-                fn poll_next(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Option<Self::Item>> {
-                    match self.poll_impl(cx) {
-                        ::std::task::Poll::Ready(val) => ::std::task::Poll::Ready(Some(val)),
-                        _ => std::task::Poll::Pending,
-                    }
-                }
-            }
+            $crate::define_stream_impl!($($name),*);
 
             #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> ::std::future::Future for __SafeSelectImpl<'a, TCap, TOut, $($name),*> where
+            impl<'a, TCap, TOut, $($name),*> ::core::future::Future for __SafeSelectImpl<'a, TCap, TOut, $($name),*> where
                 $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
             {
                 type Output = TOut;
-                fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context<'_>) -> ::std::task::Poll<Self::Output> {
+                fn poll(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
                     self.poll_impl(cx)
                 }
             }
@@ -521,16 +934,15 @@ macro_rules! safe_select {
 
             let context_hint = &context as *const _;
 
-
-            #[allow(unused)]
-            #[allow(unused_mut)]
             __SafeSelectImpl {
                 context,
-                    phantom_pinned: ::std::marker::PhantomPinned,
-                    phantom: ::std::marker::PhantomData,
+                    phantom_pinned: ::core::marker::PhantomPinned,
+                    phantom: ::core::marker::PhantomData,
                     $(
+                    #[allow(unused)]
                     $name: $name {
-                        fun: unify_fut(context_hint, move|$temp|{
+                        fun: unify_fut(context_hint, move|$temp, $canceler: &mut $crate::Canceler|{
+                            $cancelers
                             $const_captures0
                             $mutable_captures0
                             $mutable_captures1
@@ -541,10 +953,16 @@ macro_rules! safe_select {
                                 $const_captures0
                                 $mutable_captures2
                                 $(
+                                    // SAFETY:
+                                    // Only a single thread executes poll on this future. This is guaranteed
+                                    // because we take the future by `Pin<&mut Self`
                                     let mut templ = unsafe { $temp.$cap1.lock()? };
                                 )*
                                 async move {
                                     $(
+                                        // SAFETY:
+                                        // Only a single thread executes poll on this future. This is guaranteed
+                                        // because we take the future by `Pin<&mut Self`
                                         let $cap1 : &mut _ = unsafe { templ.get_mut() };
                                     )*
 
@@ -553,7 +971,8 @@ macro_rules! safe_select {
                             })
                         }),
                         fut: None,
-                        decide: move |$temp, $result|{
+                        decide: move |$temp, $result, $canceler: &mut $crate::Canceler|{
+                                $cancelers
                                 $const_captures0
                                 $mutable_captures0
                                 $mutable_captures1
@@ -562,15 +981,10 @@ macro_rules! safe_select {
                                 let t = Some($handler_body);
                                 $crate::result(t)
                             },
-                        phantom_cap: ::std::marker::PhantomData,
+                        phantom_cap: ::core::marker::PhantomData,
                     },
                     )*
             }
         }
-
-
-
     }
-
-
 }

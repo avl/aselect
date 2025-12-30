@@ -1,0 +1,43 @@
+name: Build
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  schedule:
+    - cron: "37 7 * * 1,5"
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install rust
+        run: rustup toolchain install stable
+      - name: Install 1.75
+        run: rustup toolchain install 1.75
+      - name: Build
+        run: cargo +stable build --examples
+      - name: Run tests
+        run: cargo +stable test
+      - name: Test (1.75)
+        run: cargo +1.75 test
+      - name: Run tests (release)
+        run: cargo +stable test --release
+      - name: Test (no default features)
+        run: cargo +stable test --no-default-features
+      - name: Test (no default features 1.75)
+        run: cargo +1.75 test --no-default-features
+      - name: Install nightly
+        run: rustup toolchain install nightly
+      - name: Build (all features)
+        run: cargo +nightly build --all-features
+      - name: Cargo doc
+        run: cargo +stable doc --workspace
+
+

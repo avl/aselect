@@ -1,6 +1,6 @@
 use std::pin::pin;
 use futures::StreamExt;
-use safeselect::{safe_select};
+use safeselect::{safe_select, Output};
 
 #[tokio::main]
 async fn main() {
@@ -29,11 +29,16 @@ async fn main() {
                 fut2.await;
             },
             |result| {
-                Some(*counter)
+                if *counter > 10 {
+                    Output::Terminate
+                } else {
+                    Output::Value(*counter)
+                }
             }
         ),
     ));
     while let Some(item) = stream.next().await {
         println!("Value: {}", item);
     }
+    println!("Done");
 }

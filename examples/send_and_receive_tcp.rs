@@ -63,11 +63,12 @@ async fn main() {
                 cur_port
             },
             async |cur_port| {
-                tokio::time::sleep(Duration::from_secs(1)).await;
                 let mut conn = TcpStream::connect(format!("127.0.0.1:{}", cur_port))
                     .await
                     .unwrap();
-                conn.write_all(b"hello").await
+                let result = conn.write_all(b"hello").await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                result
             },
             |res2| {
                 println!("Send result: {:?}", res2);
