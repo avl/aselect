@@ -483,7 +483,7 @@ pub struct CancelerWrapper<'a>  {
 
 
 impl Debug for CancelerWrapper<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> ::core::fmt::Result {
         write!(f, "Canceler")
     }
 }
@@ -672,7 +672,7 @@ impl CancelerWrapper<'_> {
 ///
 /// # Panics
 /// `aselect` does not itself panic. However, user-provided code blocks (setup,
-///  async_block and handler) can panic. Such panics will unwind out of the safe select
+///  async_block and handler) can panic. Such panics will unwind out of the aselect
 ///  poll method. Unless the panic is caught at a higher level, of course, the
 /// `aselect` object is likely to be dropped. But if it is not dropped, any future
 /// that panics *will* be polled again by `aselect`.
