@@ -21,12 +21,12 @@ jobs:
         run: rustup toolchain install stable
       - name: Install 1.75
         run: rustup toolchain install 1.75
+      - name: Test (1.75)
+        run: cargo +1.75 test
       - name: Build
         run: cargo +stable build --examples
       - name: Run tests
         run: cargo +stable test
-      - name: Test (1.75)
-        run: cargo +1.75 test
       - name: Run tests (release)
         run: cargo +stable test --release
       - name: Test (no default features)
