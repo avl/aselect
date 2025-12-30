@@ -10,8 +10,17 @@ characteristics, especially when used in loops:
 This crate solves this by:
 
  * Never cancelling futures (except when explicitly asked to)
- * Allowing the object created to be polled multiple times
+ * Allowing futures to live for multiple iterations of select loops
  * Not allowing async code in handler blocks.
+
+Additionally:
+
+The `aselect!` macro:
+
+ * Can be formatted by rustfmt.
+ * Does not allocate memory
+ * Can be used in a `no_std` context.
+ * Implements [Stream](https://docs.rs/futures/latest/futures/prelude/trait.Stream.html).
 
 ## Example
 
@@ -110,8 +119,6 @@ Surely there is a better way!
 This crate suggests that futures should never be canceled, except potentially during
 shutdown or as a response to faults. `aselect!` is a macro that allows writing
 select loops that never cancel futures.
-
-
 
 
 
