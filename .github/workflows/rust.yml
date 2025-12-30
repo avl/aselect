@@ -29,6 +29,8 @@ jobs:
         run: cargo +stable test
       - name: Run tests (release)
         run: cargo +stable test --release
+      - name: Build (no default features)
+        run: cargo +stable build --no-default-features
       - name: Test (no default features)
         run: cargo +stable test --no-default-features
       - name: Test (no default features 1.89)
