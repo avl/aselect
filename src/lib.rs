@@ -59,7 +59,7 @@ use core::cell::UnsafeCell;
 use core::fmt::{Debug, Formatter};
 use core::marker::PhantomData;
 use core::ptr::null_mut;
-use std::cell::Cell;
+use core::cell::Cell;
 #[cfg(feature = "futures")]
 pub use futures::Stream;
 
