@@ -49,6 +49,11 @@
 //! should cause `aselect` itself to produce a value.
 //!
 //! `aselect` does not allocate memory on the heap.
+//!
+//! ## Features
+//! Enable the `futures` feature (enabled by default) for `Stream` support.
+//! All `aselect!` invocations implement `Stream` (in addition to `Future`) when this
+//! feature is enabled.
 
 use core::cell::UnsafeCell;
 use core::fmt::{Debug, Formatter};

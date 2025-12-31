@@ -14,9 +14,7 @@ This crate solves this by:
  * Allowing futures to live for multiple iterations of select loops
  * Not allowing async code in handler blocks (only in arms).
 
-Additionally:
-
-The `aselect!` macro:
+Additionally, aselect:
 
  * Can be formatted by rustfmt.
  * Does not allocate memory
@@ -68,7 +66,7 @@ See docs and `examples/` for more complex examples. Especially, the above simple
 example does not show more advanced state tracking (for example, `constant` and `borrowed` captures).
 This example also doesn't show canceling.
 
-# Philosophy of this crate
+# Motivation for this crate
 
 Being able to easily cancel futures is a useful feature of Rust. As is the ability to have
 explicit control over the execution of async programs, using Rust's extendable and programmable
@@ -105,7 +103,7 @@ another future becomes ready after a command has been received and logged, but b
 the command will still appear in the `security_log`, it will just not have any other effect.
 
 Troubleshooting this kind of problem can be frustrating. Basically, any application that
-uses tokio `select!` needs to annotate all its method with a `# Cancel safety` header
+uses tokio `select!` needs to annotate all its methods with a `# Cancel safety` header
 in its documentation, and all code must be inspected to see if cancel safety 
 invariants are honored or not.
 
@@ -115,11 +113,11 @@ sometimes-canceled future elsewhere in the application.
 
 Surely there is a better way!
 
-# A better way
-
 This crate suggests that futures should never be canceled, except potentially during
 shutdown or as a response to faults. `aselect!` is a macro that allows writing
-select loops that never cancel futures.
+select loops that never cancel futures, and which always poll all live futures. 
+This means that the pitfalls mentioned in the beginning of this README are avoided.
+
 
 
 
