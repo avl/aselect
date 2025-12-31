@@ -19,11 +19,11 @@
 //!
 //! ### Comparison with tokio::select
 //! The regular `select!` macro from tokio is very useful, but it has two properties that can
-//! be error-prone:
+//! be error-prone when said macro is used in a loop:
 //! * As soon as one select arm completes, all other arms are canceled. Many futures are
 //!   not cancellation safe (e.g. `tokio::sync::mpsc::Sender::send`).
 //! * When an arm has completed, while the handler is executing, other arms are no longer
-//!   polled. This can lead to starvation when `select!` is used in a loop.
+//!   polled.
 //!
 //! In contrast to `select!`, aselect has these differences:
 //!  * It implements `futures::Stream`, meaning it can be polled multiple times.
@@ -31,11 +31,22 @@
 //!    become ready. It also implements `core::future::Future`.
 //!  * When polled, it *always* polls all active arms.
 //!  * It has a different syntax (that allows it to be formatted by rustfmt).
+//!  * It allows safe sharing of mutable state between select arms
+//!
+//! ### When to use tokio::select
+//! Use tokio::select when:
+//!  * Cancellation of futures is a desired outcome
+//!  * Completion of one select arm means the continued execution of other arms is meaningless
+//!
+//! ### When to use aselect
+//! Use aselect when:
+//!  * You're processing multiple async sources of information in a loop
+//!  * When you need to run multiple futures to completion, while sharing state between them
 //!
 //! ## Tips
 //!  * Both the setup and handler blocks return `Option`. This means the `?` operator can be
 //!    used in them.
-//!  * Use the `std::pin::pin!`-macro to pin the `aselect!` expression when using it as a
+//!  * Use the `core::pin::pin!`-macro to pin the `aselect!` expression when using it as a
 //!    `futures::Stream`.
 //!  * All handlers must return the same type. If no output is desired, they can just
 //!    return () (which is the default). Otherwise they must return [`Option<Output<T>>`]. Note,
@@ -174,9 +185,9 @@ impl<'a, T> UnsafeCaptureAccessCell<'a, T> {
     /// Access the captured variable
     ///
     /// The variable is only available within the closure.
-    pub fn with(&mut self, f: impl core::ops::FnOnce(&mut T)) {
+    pub fn with<R>(&mut self, f: impl core::ops::FnOnce(&mut T) -> R) -> R {
         let val = unsafe { &mut *self.value };
-        f(val);
+        f(val)
     }
 }
 

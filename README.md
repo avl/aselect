@@ -2,9 +2,9 @@
 
 # ASelect
 
-This is a rust crate intended to provide a solution to two potential pitfalls of the
-tokio `select!`-macro. While said macro is useful, it has two error-prone
-characteristics, especially when used in loops:
+This is a rust crate intended to provide an opinionated solution to two potential pitfalls 
+when the tokio `select!`-macro is used in loops. While said macro is useful, it has two 
+error-prone characteristics, when used in loops:
 
  * Each invocation of `select!` will cancel all but one future.
  * Handlers with async blocks may starve all select arms (when one `select!` arm
@@ -21,6 +21,7 @@ Additionally, aselect:
  * Can be formatted by rustfmt.
  * Does not allocate memory
  * Can be used in a `no_std` context.
+ * Allows sharing mutable state between select arms
  * Implements [Stream](https://docs.rs/futures/latest/futures/prelude/trait.Stream.html).
 
 ## Example
@@ -97,6 +98,7 @@ An illustration of the other problem is something like this:
         (cmd, user_info)
     }
 ```
+
 This method receives a command, logs it in a security log, then looks up some additional
 information and returns this to the caller. Consider what happens if this `receive_command` 
 method is used as a future in regular tokio `select!`. Things may appear to work, but if
@@ -107,7 +109,8 @@ the command will still appear in the `security_log`, it will just not have any o
 Troubleshooting this kind of problem can be frustrating. Basically, any application that
 uses tokio `select!` needs to annotate all its methods with a `# Cancel safety` header
 in its documentation, and all code must be inspected to see if cancel safety 
-invariants are honored or not.
+invariants are honored or not. Once again, Oxide has an excellent guide on the subject:
+https://rfd.shared.oxide.computer/rfd/400 .
 
 Note that this analysis must be done globally. It is typically hard to make all code
 `Cancel safe`. Thus, one must ensure that async code in one module isn't called from a 

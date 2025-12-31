@@ -33,7 +33,7 @@ async fn main() {
                     println!("Not time to be client");
                     return None;
                 };
-                println!("not server");
+                println!("Client");
             },
             async | _input |{
                 println!("Do client stuff");
