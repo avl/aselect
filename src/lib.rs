@@ -63,7 +63,7 @@ extern crate std;
 mod tests;
 
 #[doc(hidden)]
-pub trait NewFactory<'a, CTX, TOut> {
+pub trait SelectArm<'a, CTX, TOut> {
     /// Returns Some if user code was run
     /// If it was ready, it may have produced a value `Some(Some(_))` or not `Some(None)`.
     /// It is guaranteed that if this method has run user-code, it returns Some.
@@ -179,10 +179,12 @@ pub struct CaptureGuard<'a, T> {
 #[doc(hidden)]
 pub struct ConstantCapture<'a, T> {
     value: &'a T,
+    // We need invariant variance, otherwise lifetime extension
+    // will allow some unsound code.
     _variance: *mut T
 }
 
-impl<'a, T> ConstantCapture<'a, T> {
+impl<'a, T:'a> ConstantCapture<'a, T> {
     #[doc(hidden)]
     pub fn new(value: &'a T) -> Self {
         Self {
@@ -190,7 +192,7 @@ impl<'a, T> ConstantCapture<'a, T> {
             _variance: null_mut(),
         }
     }
-    pub fn const_access(&'a self) -> &'a T {
+    pub fn const_access<'b>(&'b self) -> &'b T  where 'a: 'b {
         self.value
     }
 }
@@ -409,7 +411,7 @@ macro_rules! mutable_captures2 {
 macro_rules! constant_captures0 {
     ( $temp: ident, $($cap: ident,)*) => {
         $(
-            let mut $cap = $crate::ConstantCapture::new(&$temp.$cap);
+            let $cap = $crate::ConstantCapture::new(&$temp.$cap);
         )*
     };
 }
@@ -423,7 +425,7 @@ macro_rules! constant_captures1 {
             // than captures.
             // From safety perspective, we do not protect against users calling this
             // hidden macro manually.
-            let $cap = unsafe { $cap.const_access() };
+            let $cap = $cap.const_access();
         )*
     };
 }
@@ -434,8 +436,8 @@ macro_rules! constant_captures1 {
 macro_rules! define_stream_impl {
     ($($name:ident),*) => {
             #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> $crate::Stream for __SafeSelectImpl<'a, TCap, TOut, $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            impl<'a, TCap, TOut, $($name),*> $crate::Stream for ASelectImpl<'a, TCap, TOut, $($name),*> where
+                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
             {
                 type Item = TOut;
                 fn poll_next(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<Self::Item>> {
@@ -742,14 +744,14 @@ macro_rules! aselect {
             |$async_result:ident| $handler: expr
         )$(,)?  )*
     ) => {
-        $crate::safe_select_impl!(inner constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*),$crate::constant_captures1!($($($($const_capture,)*)*)*), $crate::mutable_captures0!(temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!($($($($mutable_capture,)*)*)*), $crate::mutable_captures2!($($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!($($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
+        $crate::safe_select_impl!(constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*),$crate::constant_captures1!($($($($const_capture,)*)*)*), $crate::mutable_captures0!(temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!($($($($mutable_capture,)*)*)*), $crate::mutable_captures2!($($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!($($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
     };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! safe_select_impl {
-    ( inner constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($excl_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
+    ( constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($excl_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
 
         {
             #[allow(nonstandard_style)]
@@ -786,7 +788,7 @@ macro_rules! safe_select_impl {
                 /// Return Some if future was ready (and thus must be recreated before next iteration)
                 /// Return Some(Some(_)) if it also produced a value
                 #[allow(nonstandard_style)]
-                impl<'a, R, TOut, TCap:'a, TFun,TDecide> $crate::NewFactory<'a, TCap, TOut> for $name<'a, R, TOut, TCap, TFun, TDecide> where
+                impl<'a, R, TOut, TCap:'a, TFun,TDecide> $crate::SelectArm<'a, TCap, TOut> for $name<'a, R, TOut, TCap, TFun, TDecide> where
                     TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
                     R: ::core::future::Future+'a,
                     TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<Option<TOut>>,
@@ -836,7 +838,8 @@ macro_rules! safe_select_impl {
 
             #[allow(nonstandard_style)]
             #[allow(unused)]
-            struct __SafeSelectImpl<'a, TCap:'a, TOut, $($name),*>
+            struct ASelectImpl<'a, TCap:'a, TOut, $($name),*> where
+                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
             {
                 context: TCap,
                 #[allow(unused)]
@@ -847,8 +850,8 @@ macro_rules! safe_select_impl {
             }
 
             #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> __SafeSelectImpl<'a, TCap, TOut,  $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            impl<'a, TCap, TOut, $($name),*> ASelectImpl<'a, TCap, TOut,  $($name),*> where
+                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
             {
 
                 fn poll_next(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<TOut>> {
@@ -934,8 +937,8 @@ macro_rules! safe_select_impl {
             }
 
             #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> __SafeSelectImpl<'a, TCap, TOut,  $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            impl<'a, TCap, TOut, $($name),*> ASelectImpl<'a, TCap, TOut,  $($name),*> where
+                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
             {
                 fn poll_impl(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<TOut> {
                     match self.poll_next(cx) {
@@ -946,8 +949,8 @@ macro_rules! safe_select_impl {
             }
 
             #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> __SafeSelectImpl<'a, TCap, TOut,  $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            impl<'a, TCap, TOut, $($name),*> ASelectImpl<'a, TCap, TOut,  $($name),*> where
+                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
             {
                 fn poll_stream_impl(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<TOut>> {
                     match self.poll_next(cx) {
@@ -958,8 +961,10 @@ macro_rules! safe_select_impl {
             }
 
             // This helps with type resolution
+            // Note, the way this is used, 'a usually ends up being resolved as 'static .
+            // It will only be non-static if captured variables contain references (or are references).
             #[allow(nonstandard_style)]
-            fn unify_fut<'a, R: 'a $(,$const_cap:'a)* $(,$mutable_cap:'a)* $(,$excl_cap:'a)*, F: FnMut(&'a Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, &mut $crate::Canceler) -> R>(_hint: *const Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, func: F) -> F {
+            fn unify_fut<'a, R: 'a $(,$const_cap:'a)* $(,$mutable_cap:'a)* $(,$excl_cap:'a)*, F: FnMut(&'a Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, &mut $crate::Canceler) -> Option<R>>(_hint: *const Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, func: F) -> F {
                 func
             }
 
@@ -967,8 +972,8 @@ macro_rules! safe_select_impl {
             $crate::define_stream_impl!($($name),*);
 
             #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> ::core::future::Future for __SafeSelectImpl<'a, TCap, TOut, $($name),*> where
-                $($name: $crate::NewFactory<'a, TCap, TOut> ,)*
+            impl<'a, TCap, TOut, $($name),*> ::core::future::Future for ASelectImpl<'a, TCap, TOut, $($name),*> where
+                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
             {
                 type Output = TOut;
                 fn poll(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
@@ -979,14 +984,46 @@ macro_rules! safe_select_impl {
 
             let context_hint = &context as *const _;
 
-            __SafeSelectImpl {
+            ASelectImpl {
                 context,
-                    phantom_pinned: ::core::marker::PhantomPinned,
-                    phantom: ::core::marker::PhantomData,
-                    $(
-                    #[allow(unused)]
-                    $name: $name {
-                        fun: unify_fut(context_hint, move|$temp, $canceler: &mut $crate::Canceler|{
+                phantom_pinned: ::core::marker::PhantomPinned,
+                phantom: ::core::marker::PhantomData,
+                $(
+                #[allow(unused)]
+                $name: $name {
+                    fun: unify_fut(context_hint, move|$temp, $canceler: &mut $crate::Canceler|{
+                        $cancelers
+                        $const_captures0
+                        $const_captures1
+                        $mutable_captures0
+                        $mutable_captures1
+                        $excl_captures0
+                        $excl_captures1
+                        Some({
+                            let mut $fut_input = {$body0};
+                            $mutable_captures2
+                            $(
+                                // SAFETY:
+                                // Only a single thread executes poll on this future. This is guaranteed
+                                // because we take the future by `Pin<&mut Self`
+                                let mut $cap1 = unsafe { $temp.$cap1.lock()? };
+                            )*
+                            async move {
+                                $const_captures0
+                                $const_captures1
+                                $(
+                                    // SAFETY:
+                                    // Only a single thread executes poll on this future. This is guaranteed
+                                    // because we take the future by `Pin<&mut Self`
+                                    let $cap1 : &mut _ = unsafe { $cap1.get_mut() };
+                                )*
+
+                                $body1
+                            }
+                        })
+                    }),
+                    fut: None,
+                    decide: move |$temp, $result, $canceler: &mut $crate::Canceler|{
                             $cancelers
                             $const_captures0
                             $const_captures1
@@ -994,44 +1031,12 @@ macro_rules! safe_select_impl {
                             $mutable_captures1
                             $excl_captures0
                             $excl_captures1
-                            Some({
-                                let mut $fut_input = {$body0};
-                                $mutable_captures2
-                                $(
-                                    // SAFETY:
-                                    // Only a single thread executes poll on this future. This is guaranteed
-                                    // because we take the future by `Pin<&mut Self`
-                                    let mut $cap1 = unsafe { $temp.$cap1.lock()? };
-                                )*
-                                async move {
-                                    $const_captures0
-                                    $const_captures1
-                                    $(
-                                        // SAFETY:
-                                        // Only a single thread executes poll on this future. This is guaranteed
-                                        // because we take the future by `Pin<&mut Self`
-                                        let $cap1 : &mut _ = unsafe { $cap1.get_mut() };
-                                    )*
-
-                                    $body1
-                                }
-                            })
-                        }),
-                        fut: None,
-                        decide: move |$temp, $result, $canceler: &mut $crate::Canceler|{
-                                $cancelers
-                                $const_captures0
-                                $const_captures1
-                                $mutable_captures0
-                                $mutable_captures1
-                                $excl_captures0
-                                $excl_captures1
-                                let t = Some($handler_body);
-                                $crate::result(t)
-                            },
-                        phantom_cap: ::core::marker::PhantomData,
-                    },
-                    )*
+                            let t = Some($handler_body);
+                            $crate::result(t)
+                        },
+                    phantom_cap: ::core::marker::PhantomData,
+                },
+                )*
             }
         }
     }

@@ -108,31 +108,38 @@ async fn repeated_cancellation() {
 #[tokio::test(start_paused = true)]
 async fn use_all_capture_types() {
 
+    let owned_constant: u32 = 44;
+
     let counter = 0u32;
     let borrowed = "Borrowed".to_string();
     let constant: u32 = 43;
+    let ref_constant = &owned_constant;
+
 
     let result = aselect!(
         {
             mutable(counter);
-            constant(constant);
+            constant(constant, ref_constant);
             borrowed(borrowed);
         },
         timer1(
             {
                 dbg!(&counter, constant, &borrowed);
                 (*counter) += 1;
+                //assert_eq!(**ref_constant, 44u32);
+                let _t: u32 = *ref_constant;
 
                 *borrowed? = "Set".to_string();
             },
             async |_unused, borrowed| {
                 *borrowed = "Modified".to_string();
                 sleep(Duration::from_secs(1)).await;
-                
+
             },
             |c| {
-                dbg!(&counter, constant, &borrowed);
                 (*counter) += 1;
+                assert_eq!(*constant, 43u32);
+                //assert_eq!(*ref_constant, &44u32);
                 *borrowed? = "Set2".to_string();
                 None
             }
@@ -151,6 +158,7 @@ async fn use_all_capture_types() {
                 // After the 10 seconds have elapsed,
                 assert_eq!(*constant, 43);
                 assert_eq!(*counter, 6);
+                //assert_eq!(*ref_constant, &44u32);
                 assert_eq!(*borrowed.unwrap(), "Set2");
                 Some("finished")
             }
