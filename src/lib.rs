@@ -37,6 +37,10 @@
 //!    used in them.
 //!  * Use the `std::pin::pin!`-macro to pin the `aselect!` expression when using it as a
 //!    `futures::Stream`.
+//!  * All handlers must return the same type. If no output is desired, they can just
+//!    return () (which is the default). Otherwise they must return [`Option<Output<T>>`]. Note,
+//!    since the handler is wrapped in `Some`, making sure the handler evaluates to `Output`
+//!    is enough. Or you can explicitly `return Some(Output::Value(x))`.
 //!
 //! ## Implementation
 //! [`aselect`] works by creating a set of structs that implement a state machine.
@@ -45,14 +49,12 @@
 //! should cause `aselect` itself to produce a value.
 //!
 //! `aselect` does not allocate memory on the heap.
-//!
-//!
 
 use core::cell::UnsafeCell;
 use core::fmt::{Debug, Formatter};
 use core::marker::PhantomData;
 use core::ptr::null_mut;
-
+use std::cell::Cell;
 #[cfg(feature = "futures")]
 pub use futures::Stream;
 
@@ -254,23 +256,37 @@ impl<T> Drop for CaptureGuard<'_, T> {
     }
 }
 
-#[doc(hidden)]
+
+/// Trait that must be implemented by the type returned by the handler expression of a
+/// [`aselect`] arm.
+#[diagnostic::on_unimplemented(
+    message = "aselect! arm handlers must not evaluate to `{Self}`. Try `Option`, `aselect::Output` or `()`.",
+    label = "Not usable as the value of a handler expression",
+    note = "As a convenience, the aselect! macro wraps the handler expression value in a method expecting `impl SafeResult`.",
+    note = "The actual return type of the closure is Option<Output<T>>, where T is the user output type of the future/stream.",
+    note = "All arms must have the same type T."
+)]
 pub trait SafeResult {
-    type Output;
-    /// Some(Some(x)) - return value
-    /// Some(None) - end stream
-    /// None - pending
-    fn result(self) -> Option<Option<Self::Output>>;
+    /// The item type of the `aselect` macro.
+    ///
+    /// This is the type produced by awaiting the macro.
+    type Item;
+
+    /// Retrieve the actual result of the handler arm:
+    ///
+    /// Some(Output::Value(x)) - produce x as an item of the future/stream
+    /// Some(Output::Terminate) - end stream
+    /// None - future is still pending (no value produced)
+    fn result(self) -> Option<Output<Self::Item>>;
 }
 
-/// Marker type to signal that the stream is to be terminated.
-pub struct Terminate<R>(PhantomData<R>);
-
-
-#[doc(hidden)]
+/// Output from a [`aselect`] handler.
+///
+/// This affects what values are produced by the `aselect` stream/future.
 pub enum Output<R> {
-    Pending,
+    /// Produce the given value as an item in the stream
     Value(R),
+    /// End the stream now, without producing a value
     Terminate
 }
 
@@ -281,31 +297,26 @@ pub fn terminate<R>() -> Output<R> {
 }
 
 #[doc(hidden)]
-pub fn result<T: SafeResult>(input: Option<T>) -> Option<Option<T::Output>> {
+pub fn result<T: SafeResult>(input: Option<T>) -> Option<Output<T::Item>> {
     input?.result()
 }
 impl<R> SafeResult for Option<R> {
-    type Output = R;
+    type Item = R;
 
-    fn result(self) -> Option<Option<Self::Output>> {
-        Some(Some(self?))
+    fn result(self) -> Option<Output<Self::Item>> {
+        Some(Output::Value(self?))
     }
 }
 impl<R> SafeResult for Output<R> {
-    type Output = R;
+    type Item = R;
 
-    fn result(self) -> Option<Option<Self::Output>> {
-        match self {
-            Output::Pending => None,
-            Output::Value(v) => Some(Some(v)),
-            Output::Terminate => Some(None),
-        }
-
+    fn result(self) -> Option<Output<Self::Item>> {
+        Some(self)
     }
 }
 impl SafeResult for () {
-    type Output = ();
-    fn result(self) -> Option<Option<Self::Output>> {
+    type Item = ();
+    fn result(self) -> Option<Output<Self::Item>> {
         None
     }
 }
@@ -349,7 +360,7 @@ macro_rules! cancelers {
             // than canceler.
             // From safety perspective, we do not protect against users calling this
             // hidden macro manually.
-            let mut $arm_name = unsafe { $crate::CancelerWrapper::new($canceler, i) };
+            let mut $arm_name = $crate::CancelerWrapper::new($canceler, i);
             i+=1;
         )*
     };
@@ -473,46 +484,33 @@ pub enum PollResult<T> {
 #[derive(Debug)]
 pub struct Canceler {
     #[doc(hidden)]
-    pub canceled: UnsafeCell<u64>,
+    pub canceled: Cell<u64>,
 }
 impl Canceler {
     #[doc(hidden)]
     pub fn new() -> Canceler {
-        Canceler { canceled: UnsafeCell::new(0) }
+        Canceler { canceled: Cell::new(0) }
     }
 
-    /// # Safety
-    /// No concurrent access must occur
     #[doc(hidden)]
-    pub unsafe fn any(&self) -> bool {
-        // Safety:
-        // Caller guarantees no concurrent access
-        (unsafe {*self.canceled.get()}) != 0
+    pub fn any(&self) -> bool {
+        self.canceled.get() != 0
     }
 
-    /// # Safety
-    /// No concurrent access must occur
     #[doc(hidden)]
-    pub unsafe fn canceled(&self, i: u32) -> bool {
-        // Safety:
-        // Caller guarantees no concurrent access
-        (unsafe {*self.canceled.get()} & (1<<i)) != 0
+    pub fn canceled(&self, i: u32) -> bool {
+        (self.canceled.get() & (1<<i)) != 0
     }
 
     /// Cancel the select arm with the given index.
     ///
     /// The first arm has index 0, arms are then numbered consecutively.
-    ///
-    /// # Safety
-    /// The Canceler must not be concurrently accessed.
-    pub unsafe fn cancel(&self, index: u32) {
+    pub fn cancel(&self, index: u32) {
         if index >= 64 {
             panic!("aselect only supports canceling the first 64 arms of a aselect invocation.");
         }
-        // Safety:
-        // Caller guarantees no concurrent access
-        let val = unsafe { &mut *self.canceled.get()};
-         *val |=  1 << index;
+        let val = self.canceled.get();
+         self.canceled.set(val |  1 << index);
     }
 }
 
@@ -532,18 +530,13 @@ impl Debug for CancelerWrapper<'_> {
 }
 
 impl CancelerWrapper<'_> {
-    // # Safety
-    // Canceler must not be accessed from other threads
-    pub unsafe fn new(canceler: &Canceler, index: u32) -> CancelerWrapper<'_> {
+    #[doc(hidden)]
+    pub fn new(canceler: &Canceler, index: u32) -> CancelerWrapper<'_> {
         CancelerWrapper { canceler, index }
     }
+    /// Cancel the select arm represented by this object
     pub fn cancel(&mut self) {
-        // Safety:
-        // CancelerWrapper not constructable in safe code. All constructors
-        // promise that `self.canceler` is not accessed concurrently.
-        unsafe {
-            self.canceler.cancel(self.index);
-        }
+        self.canceler.cancel(self.index);
     }
 }
 
@@ -654,6 +647,23 @@ impl CancelerWrapper<'_> {
 /// capture an arbitrary number of `borrowed` capture variables by listing them as further
 /// parameters, after the initial 'async_input' parameter.
 ///
+/// # Producing output
+/// To produce an output from the `aselect!` macro, end the handler block with
+/// `Output::Value(val)` - this will produce `val` as an output from the future.
+/// `Output::Pending` produces no value.
+///
+/// When `aselect` is used as a `futures::Stream`, use `Output::Terminate` to signal the
+/// end of the stream.
+
+/// As a convenience, `Some(val)` is also accepted, as shorthand for `Output::Value`.
+/// `None` can be used to not produce a value (equivalent to `Output::Pending`).
+///
+///
+/// Note, the return type of the closure in which the `handler` expression is evaluated is
+/// actually `Option<Output>`. The reason for this is that this allows using the `?`-operator
+/// in the handler block. Returning `None` from the closure is used to produce no value
+/// (equivalent to Output::Pending).
+///
 /// # Canceling arms
 /// While `aselect` never automatically cancels arms (unless the whole object is dropped),
 /// arms can still be canceled explicitly. The syntax for this is slightly obscure:
@@ -721,7 +731,7 @@ impl CancelerWrapper<'_> {
 /// `aselect` object is likely to be dropped. But if it is not dropped, any future
 /// that panics *will* be polled again by `aselect`.
 ///
-/// # Troubleshooting
+/// # Troubleshooting compilation faults
 ///
 /// Since `aselect!` is a pure declarative macro, and generates non-trivial code,
 /// using it can sometimes result in very bad compilation errors. Please start with one
@@ -776,7 +786,7 @@ macro_rules! safe_select_impl {
                 struct $name<'a, R, TOut, TCap:'a, TFun, TDecide> where
                     TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
                     R: ::core::future::Future+'a,
-                    TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<Option<TOut>>,
+                    TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<$crate::Output<TOut>>,
 
                 {
                     fun: TFun,
@@ -785,13 +795,29 @@ macro_rules! safe_select_impl {
                     phantom_cap: ::core::marker::PhantomData<&'a TCap>,
                 }
 
+                #[allow(nonstandard_style)]
+                impl<'a, R, TOut, TCap:'a, TFun,TDecide> $name<'a, R, TOut, TCap, TFun, TDecide> where
+                    TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
+                    R: ::core::future::Future+'a,
+                    TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<$crate::Output<TOut>>,
+                {
+                    fn new(_context_hint: &TCap, fun: TFun, decide: TDecide) -> Self {
+                        Self {
+                            fun,
+                            decide,
+                            fut: None,
+                            phantom_cap: ::core::marker::PhantomData,
+                        }
+                    }
+
+                }
                 /// Return Some if future was ready (and thus must be recreated before next iteration)
                 /// Return Some(Some(_)) if it also produced a value
                 #[allow(nonstandard_style)]
                 impl<'a, R, TOut, TCap:'a, TFun,TDecide> $crate::SelectArm<'a, TCap, TOut> for $name<'a, R, TOut, TCap, TFun, TDecide> where
                     TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
                     R: ::core::future::Future+'a,
-                    TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<Option<TOut>>,
+                    TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<$crate::Output<TOut>>,
                 {
 
                     fn cancel(&mut self) {
@@ -816,10 +842,10 @@ macro_rules! safe_select_impl {
                             ::core::task::Poll::Ready(out) => {
                                 self.fut = None;
                                 match (self.decide)(ctx, out, canceler) {
-                                    Some(Some(c)) => {
+                                    Some($crate::Output::Value(c)) => {
                                         return $crate::PollResult::Result(c);
                                     }
-                                    Some(None) => {
+                                    Some($crate::Output::Terminate) => {
                                         return $crate::PollResult::EndStream;
                                     }
                                     _ => {
@@ -910,14 +936,14 @@ macro_rules! safe_select_impl {
                         // SAFETY:
                         // Only a single thread executes poll on this future. This is guaranteed
                         // because we take the future by `Pin<&mut Self`
-                        if unsafe { canceler.any() } {
+                        if canceler.any() {
                             can_yield = false;
                             let mut i = 0;
                             $(
                                 // SAFETY:
                                 // Only a single thread executes poll on this future. This is guaranteed
                                 // because we take the future by `Pin<&mut Self`
-                                if unsafe { canceler.canceled(i as u32) } {
+                                if canceler.canceled(i as u32) {
                                     this.$name.cancel();
                                     runnable[i] = true;
                                 }
@@ -960,15 +986,6 @@ macro_rules! safe_select_impl {
                 }
             }
 
-            // This helps with type resolution
-            // Note, the way this is used, 'a usually ends up being resolved as 'static .
-            // It will only be non-static if captured variables contain references (or are references).
-            #[allow(nonstandard_style)]
-            fn unify_fut<'a, R: 'a $(,$const_cap:'a)* $(,$mutable_cap:'a)* $(,$excl_cap:'a)*, F: FnMut(&'a Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, &mut $crate::Canceler) -> Option<R>>(_hint: *const Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, func: F) -> F {
-                func
-            }
-
-
             $crate::define_stream_impl!($($name),*);
 
             #[allow(nonstandard_style)]
@@ -982,16 +999,12 @@ macro_rules! safe_select_impl {
             }
 
 
-            let context_hint = &context as *const _;
-
             ASelectImpl {
-                context,
                 phantom_pinned: ::core::marker::PhantomPinned,
                 phantom: ::core::marker::PhantomData,
                 $(
                 #[allow(unused)]
-                $name: $name {
-                    fun: unify_fut(context_hint, move|$temp, $canceler: &mut $crate::Canceler|{
+                $name: $name::new(&context, move|$temp, $canceler: &mut $crate::Canceler|{
                         $cancelers
                         $const_captures0
                         $const_captures1
@@ -1021,9 +1034,8 @@ macro_rules! safe_select_impl {
                                 $body1
                             }
                         })
-                    }),
-                    fut: None,
-                    decide: move |$temp, $result, $canceler: &mut $crate::Canceler|{
+                    },
+                    move |$temp, $result, $canceler: &mut $crate::Canceler|{
                             $cancelers
                             $const_captures0
                             $const_captures1
@@ -1034,9 +1046,9 @@ macro_rules! safe_select_impl {
                             let t = Some($handler_body);
                             $crate::result(t)
                         },
-                    phantom_cap: ::core::marker::PhantomData,
-                },
+                ),
                 )*
+                context,
             }
         }
     }

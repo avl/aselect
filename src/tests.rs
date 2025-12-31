@@ -5,7 +5,7 @@ use crate::{aselect};
 use futures::{Stream, StreamExt};
 use tokio::select;
 use tokio::time::{sleep, timeout, Instant};
-use std::{dbg, println};
+use std::{println};
 use std::future::Future;
 use std::string::ToString;
 use std::task::{Context, Waker};
@@ -124,10 +124,9 @@ async fn use_all_capture_types() {
         },
         timer1(
             {
-                dbg!(&counter, constant, &borrowed);
                 (*counter) += 1;
-                //assert_eq!(**ref_constant, 44u32);
-                let _t: u32 = *ref_constant;
+                assert_eq!(*constant, 43u32);
+                assert_eq!(**ref_constant, 44u32);
 
                 *borrowed? = "Set".to_string();
             },
@@ -139,6 +138,7 @@ async fn use_all_capture_types() {
             |c| {
                 (*counter) += 1;
                 assert_eq!(*constant, 43u32);
+                assert_eq!(**ref_constant, 44u32);
                 //assert_eq!(*ref_constant, &44u32);
                 *borrowed? = "Set2".to_string();
                 None
@@ -150,12 +150,14 @@ async fn use_all_capture_types() {
             },
             async |sleep_fut| {
                 sleep_fut.await;
+                assert_eq!(**ref_constant, 44u32);
                 sleep(Duration::from_secs(1)).await;
                 sleep(Duration::from_secs(1)).await;
             },
             |_unused| {
                 println!("Timer 2 done");
                 // After the 10 seconds have elapsed,
+                assert_eq!(**ref_constant, 44u32);
                 assert_eq!(*constant, 43);
                 assert_eq!(*counter, 6);
                 //assert_eq!(*ref_constant, &44u32);
@@ -259,16 +261,52 @@ async fn test_no_hang_if_all_async_blocks_disabled() {
         )).await.unwrap_err();
 }
 
+
+
+
+
+// Test that all types of capture work
 #[tokio::test(start_paused = true)]
-async fn test_regular_select() {
-    select!(
-        _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
-            println!("Arm 1 start");
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            println!("Arm 2 done");
-        }
-        _ = tokio::time::sleep(tokio::time::Duration::from_secs(2)) => {
-            println!("Arm 2");
-        }
-    )
+async fn test_cancel_works() {
+
+
+
+    let result = aselect!(
+        {
+        },
+        timer1(
+            {
+            },
+            async |_unused| {
+                sleep(Duration::from_secs(1)).await;
+            },
+            |c| {
+                timer2.cancel();
+                None
+            }
+        ),
+        timer2(
+            {
+                tokio::time::sleep(tokio::time::Duration::from_secs(10))
+            },
+            async |sleep_fut| {
+                sleep_fut.await;
+            },
+            |_unused| {
+                Some("timer2")
+            }
+        ),
+        timer3(
+            {
+                tokio::time::sleep(tokio::time::Duration::from_secs(20))
+            },
+            async |sleep_fut| {
+                sleep_fut.await;
+            },
+            |_unused| {
+                Some("timer3")
+            }
+        ),
+    ).await;
+    assert_eq!(result, "timer3"); //timer2 is cancelled every second
 }
