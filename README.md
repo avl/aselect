@@ -1,3 +1,5 @@
+[![Build](https://github.com/avl/aselect/actions/workflows/rust.yml/badge.svg)](https://github.com/avl/aselect/actions/workflows/rust.yml)
+
 # ASelect
 
 This is a rust crate intended to provide a solution to two potential pitfalls of the
