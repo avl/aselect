@@ -186,6 +186,11 @@ impl<'a, T> UnsafeCaptureAccessCell<'a, T> {
     ///
     /// The variable is only available within the closure.
     pub fn with<R>(&mut self, f: impl core::ops::FnOnce(&mut T) -> R) -> R {
+        // SAFETY:
+        // UnsafeCaptureAccessCell can only be created by unsafe methods.
+        // The caller of these methods guarantees that the value is only accessed
+        // while polling the aselect future/stream, and thus only from a single thread
+        // at a time.
         let val = unsafe { &mut *self.value };
         f(val)
     }
@@ -205,6 +210,8 @@ impl<T> UnsafeCaptureAccess<T> {
     /// # Safety
     /// The underlying captured value must still be alive, and
     /// must be mutably accessible without causing aliasing.
+    /// The returned cell value must not escape such that it can be called
+    /// from outside the polling of the aselect future.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_cell(&self) -> UnsafeCaptureAccessCell<'_, T> {
         UnsafeCaptureAccessCell {
@@ -706,7 +713,6 @@ impl CancelerWrapper<'_> {
 ///
 /// When `aselect` is used as a `futures::Stream`, use `Output::Terminate` to signal the
 /// end of the stream.
-
 /// As a convenience, `Some(val)` is also accepted, as shorthand for `Output::Value`.
 /// `None` can be used to not produce a value (equivalent to `Output::Pending`).
 ///
@@ -789,7 +795,6 @@ impl CancelerWrapper<'_> {
 /// using it can sometimes result in very bad compilation errors. Please start with one
 /// of the examples, and carefully modify it step-by-step into the desired shape, taking
 /// note exactly at what step it stops compiling. Bug reports are welcome.
-///
 #[macro_export]
 macro_rules! aselect {
     (
