@@ -3,7 +3,6 @@
 use core::pin::pin;
 use crate::{aselect};
 use futures::{Stream, StreamExt};
-use tokio::select;
 use tokio::time::{sleep, timeout, Instant};
 use std::{println};
 use std::future::Future;
@@ -114,7 +113,7 @@ async fn use_all_capture_types() {
     let borrowed = "Borrowed".to_string();
     let constant: u32 = 43;
     let ref_constant = &owned_constant;
-
+    
 
     let result = aselect!(
         {
@@ -132,6 +131,8 @@ async fn use_all_capture_types() {
             },
             async |_unused, borrowed| {
                 *borrowed = "Modified".to_string();
+                counter.with(|cnt| *cnt += 1);
+
                 sleep(Duration::from_secs(1)).await;
 
             },
@@ -159,7 +160,7 @@ async fn use_all_capture_types() {
                 // After the 10 seconds have elapsed,
                 assert_eq!(**ref_constant, 44u32);
                 assert_eq!(*constant, 43);
-                assert_eq!(*counter, 6);
+                assert_eq!(*counter, 9);
                 //assert_eq!(*ref_constant, &44u32);
                 assert_eq!(*borrowed.unwrap(), "Set2");
                 Some("finished")
@@ -268,8 +269,6 @@ async fn test_no_hang_if_all_async_blocks_disabled() {
 // Test that all types of capture work
 #[tokio::test(start_paused = true)]
 async fn test_cancel_works() {
-
-
 
     let result = aselect!(
         {

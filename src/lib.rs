@@ -164,6 +164,22 @@ pub struct UnsafeCaptureAccess<T> {
     value: *mut T,
 }
 
+#[doc(hidden)]
+pub struct UnsafeCaptureAccessCell<'a, T> {
+    value: *mut T,
+    phantom: PhantomData<&'a ()>,
+}
+
+impl<'a, T> UnsafeCaptureAccessCell<'a, T> {
+    /// Access the captured variable
+    ///
+    /// The variable is only available within the closure.
+    pub fn with(&mut self, f: impl core::ops::FnOnce(&mut T)) {
+        let val = unsafe { &mut *self.value };
+        f(val);
+    }
+}
+
 impl<T> UnsafeCaptureAccess<T> {
     /// # Safety
     /// The underlying captured value must still be alive, and
@@ -174,6 +190,20 @@ impl<T> UnsafeCaptureAccess<T> {
         // Caller guarantees captured value is still alive
         unsafe { &mut *self.value }
     }
+
+    /// # Safety
+    /// The underlying captured value must still be alive, and
+    /// must be mutably accessible without causing aliasing.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn get_cell(&self) -> UnsafeCaptureAccessCell<'_, T> {
+        UnsafeCaptureAccessCell {
+            value: self.value,
+            phantom: PhantomData,
+        }
+    }
+
+
+
 }
 
 #[doc(hidden)]
@@ -399,25 +429,27 @@ macro_rules! mutable_captures1 {
     };
 }
 
-/// Marker type that is bound to mutable captures in the context of
-/// async blocks.
-///
-/// This makes it clear that mutable captured variables cannot be
-/// accessed from within an async block.
-///
-/// The reason for this limitation is that multiple async blocks can execute
-/// concurrently, and the semantics of mutable references in rust forbid concurrent
-/// access.
-#[derive(Clone, Copy, Debug)]
-#[doc(hidden)]
-pub struct MutableValueUnavailableInThisAsyncContext;
-
 #[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures2 {
+    ( $temp: ident, $($cap: ident,)*) => {
+        $(
+            let $cap = unsafe { $temp.$cap.access()};
+        )*
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! mutable_captures3 {
     ( $($cap: ident,)*) => {
         $(
-            let mut $cap = $crate::MutableValueUnavailableInThisAsyncContext;
+            // SAFETY:
+            // Only called from inside `aselect`-macro, in closures that live shorter
+            // than captures.
+            // From safety perspective, we do not protect against users calling this
+            // hidden macro manually.
+            let mut $cap = unsafe { $cap.get_cell() };
         )*
     };
 }
@@ -632,7 +664,11 @@ impl CancelerWrapper<'_> {
 ///
 ///  * `constant`: Capture is available in all three blocks, for every arm. Captured variable
 ///    is immutable.
-///  * `mutable`: Capture is available in setup and handler only. Captured variable is mutable.
+///  * `mutable`: Capture is immediately available in setup and handler only. Captured variable
+///    is mutable. Since the captured value must not be stored in a future (this could cause
+///    aliasing if multiple arms did so), the value is only available from within the `with`
+///    method on the capture (in an async_block).
+///
 ///  * `borrowed`: Capture is available in all three blocks. The variable can be borrowed by
 ///    exactly one async_block (at any instant). In setup and handler, borrowed variables
 ///    are wrapped in an `Option`. If a variable is currently borrowed by another async block,
@@ -759,14 +795,14 @@ macro_rules! aselect {
             |$async_result:ident| $handler: expr
         )$(,)?  )*
     ) => {
-        $crate::safe_select_impl!(constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*),$crate::constant_captures1!($($($($const_capture,)*)*)*), $crate::mutable_captures0!(temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!($($($($mutable_capture,)*)*)*), $crate::mutable_captures2!($($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!($($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
+        $crate::safe_select_impl!(constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*),$crate::constant_captures1!($($($($const_capture,)*)*)*), $crate::mutable_captures0!(temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!($($($($mutable_capture,)*)*)*), $crate::mutable_captures2!(temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures3!($($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!($($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
     };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! safe_select_impl {
-    ( constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($excl_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
+    ( constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($excl_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$mutable_captures3: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
 
         {
             #[allow(nonstandard_style)]
@@ -1019,7 +1055,6 @@ macro_rules! safe_select_impl {
                         $excl_captures1
                         Some({
                             let mut $fut_input = {$body0};
-                            $mutable_captures2
                             $(
                                 // SAFETY:
                                 // Only a single thread executes poll on this future. This is guaranteed
@@ -1029,6 +1064,8 @@ macro_rules! safe_select_impl {
                             async move {
                                 $const_captures0
                                 $const_captures1
+                                $mutable_captures2
+                                $mutable_captures3
                                 $(
                                     // SAFETY:
                                     // Only a single thread executes poll on this future. This is guaranteed
