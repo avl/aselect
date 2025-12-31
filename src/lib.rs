@@ -11,9 +11,11 @@
 //!
 //! This crate implements [`aselect`], a safer alternative to the tokio `select!`-macro.
 //! By using `aselect`, it becomes possible to avoid cancelling futures during normal
-//! operations, eliminating a class of bugs. See the excellent RFD 400 from Oxide computer
+//! operations, eliminating a class of bugs. See the excellent RFD 400 from Oxide
 //! for a great overview of cancellation safety in rust:
-//! <https://rfd.shared.oxide.computer/rfd/400> .
+//! <https://rfd.shared.oxide.computer/rfd/400> . `aselect` also avoids the "FutureLock"
+//! class of bugs, described (also by Oxide) at <https://rfd.shared.oxide.computer/rfd/0609>,
+//! because it doesn't allow async code in handlers (only in the actual concurrent arms).
 //!
 //! ### Comparison with tokio::select
 //! The regular `select!` macro from tokio is very useful, but it has two properties that can
@@ -25,12 +27,18 @@
 //!
 //! In contrast to `select!`, aselect has these differences:
 //!  * It implements `futures::Stream`, meaning it can be polled multiple times.
-//!    When polled repeatedly, it never cancels any futures; arms are polled until they
+//!    When polled repeatedly, it never implicitly cancels any futures; arms are polled until they
 //!    become ready. It also implements `core::future::Future`.
 //!  * When polled, it *always* polls all active arms.
 //!  * It has a different syntax (that allows it to be formatted by rustfmt).
 //!
-//! # Implementation
+//! ## Tips
+//!  * Both the setup and handler blocks return `Option`. This means the `?` operator can be
+//!    used in them.
+//!  * Use the `std::pin::pin!`-macro to pin the `aselect!` expression when using it as a
+//!    `futures::Stream`.
+//!
+//! ## Implementation
 //! [`aselect`] works by creating a set of structs that implement a state machine.
 //! Each select arm is its own struct, and consists of two closures and a stored future.
 //! One of the closures creates the future, and the other decides if the result of a future
@@ -166,6 +174,25 @@ pub struct CaptureGuard<'a, T> {
     lock: &'a UnsafeCell<bool>,
     #[doc(hidden)]
     value: *mut T,
+}
+
+#[doc(hidden)]
+pub struct ConstantCapture<'a, T> {
+    value: &'a T,
+    _variance: *mut T
+}
+
+impl<'a, T> ConstantCapture<'a, T> {
+    #[doc(hidden)]
+    pub fn new(value: &'a T) -> Self {
+        Self {
+            value,
+            _variance: null_mut(),
+        }
+    }
+    pub fn const_access(&'a self) -> &'a T {
+        self.value
+    }
 }
 
 impl<'a, T> Debug for CaptureGuard<'a, T>
@@ -382,7 +409,21 @@ macro_rules! mutable_captures2 {
 macro_rules! constant_captures0 {
     ( $temp: ident, $($cap: ident,)*) => {
         $(
-            let mut $cap = &$temp.$cap;
+            let mut $cap = $crate::ConstantCapture::new(&$temp.$cap);
+        )*
+    };
+}
+#[doc(hidden)]
+#[macro_export]
+macro_rules! constant_captures1 {
+    ( $($cap: ident,)*) => {
+        $(
+            // SAFETY:
+            // Only called from inside `aselect`-macro, in closures that live shorter
+            // than captures.
+            // From safety perspective, we do not protect against users calling this
+            // hidden macro manually.
+            let $cap = unsafe { $cap.const_access() };
         )*
     };
 }
@@ -507,7 +548,6 @@ impl CancelerWrapper<'_> {
 
 /// Evaluate multiple different async operations concurrently.
 ///
-///
 /// Example:
 /// ```rust
 /// use aselect::aselect;
@@ -582,10 +622,10 @@ impl CancelerWrapper<'_> {
 /// ## Enabling/disabling arms
 /// The setup block returns an Option. The whole setup expression is invisibly wrapped in
 /// `Some(..)`, so this is not immediately obvious. By returning `None` from the setup block,
-/// the arm can be disabled. The setup-block is re-evaluated whenever any arm completes.
+/// the arm can be disabled.
 ///
 /// ## Captures
-/// Variables can be captured for use within the three blocks: setup, async_block and
+/// Variables can be captured for use within the three blocks: setup, async_block, and
 /// handler.
 ///
 /// There are three types of capture:
@@ -633,7 +673,7 @@ impl CancelerWrapper<'_> {
 /// tokio `select!` arm is fine and will not cause any futures to be canceled (unless the
 /// select!-macro takes ownership of `aselect` and thus drops it on cancellation).
 ///
-/// # Precise semantics of aselect state machine
+/// # Precise semantics of the aselect state machine
 /// Every time the `aselect` macro object is polled, the following is performed:
 /// * Each arm is visited in order (top to bottom)
 /// * For each arm:
@@ -643,18 +683,21 @@ impl CancelerWrapper<'_> {
 ///   * Poll any stored future
 ///     * If the future is ready, and produced a value: Return the value to the callee.
 ///     * If the future is pending: Disable the arm for the duration of this poll.
-/// * Repeat above until all the following conditions are satisfied:
-///   * No setup code block produced a new future (this condition exists to ensure any
-///     side effects of creating a new future are visible to other setup blocks).
+/// * Repeat above for each arm until any of the following conditions are satisfied:
+///   * No setup code block produced a new future, and no future completed in this iteration
+///     (these conditions exist to ensure any side effects of creating a new future or completing
+///     a future are visible to other setup blocks).
+///   * The loop has run for more than 10 iterations.
 ///
-/// It is expected that user code normally satisfies the halt condition within one or two
-/// iterations. A failure to do so is possibly a programming error: Either all the arms
-/// have been disabled, or futures keep being ready without producing any output.
+///
+/// It is expected that user code normally satisfies the condition within one or two
+/// iterations. A failure to do so is possibly a programming error: futures keep being ready
+/// without producing any output.
 ///
 /// If all arms have been disabled, the future will be pending forever. Since no waker
 /// has been registered in this case, the future might never be polled again.
 ///
-/// If the above is repeated for more than 10 times, the poll context waker is awoken,
+/// If the iteration limit has been reached, the poll context waker is awoken,
 /// and the poll returns pending. This makes sure `aselect` does not hang the async
 /// runtime. In this condition the current CPU core will be occupied 100%, which may be
 /// undesirable. However, it's possible that this is desired behavior: It would happen,
@@ -669,10 +712,9 @@ impl CancelerWrapper<'_> {
 ///    only one of them will actually be constructed. The other(s) will be disabled.
 ///
 ///
-///
 /// # Panics
 /// `aselect` does not itself panic. However, user-provided code blocks (setup,
-///  async_block and handler) can panic. Such panics will unwind out of the aselect
+///  async_block, and handler) can panic. Such panics will unwind out of the aselect
 ///  poll method. Unless the panic is caught at a higher level, of course, the
 /// `aselect` object is likely to be dropped. But if it is not dropped, any future
 /// that panics *will* be polled again by `aselect`.
@@ -680,7 +722,9 @@ impl CancelerWrapper<'_> {
 /// # Troubleshooting
 ///
 /// Since `aselect!` is a pure declarative macro, and generates non-trivial code,
-/// using it can sometimes result in very bad compilation errors.
+/// using it can sometimes result in very bad compilation errors. Please start with one
+/// of the examples, and carefully modify it step-by-step into the desired shape, taking
+/// note exactly at what step it stops compiling. Bug reports are welcome.
 ///
 #[macro_export]
 macro_rules! aselect {
@@ -698,14 +742,14 @@ macro_rules! aselect {
             |$async_result:ident| $handler: expr
         )$(,)?  )*
     ) => {
-        $crate::safe_select_impl!(inner constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*), $crate::mutable_captures0!(temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!($($($($mutable_capture,)*)*)*), $crate::mutable_captures2!($($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!($($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
+        $crate::safe_select_impl!(inner constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*),$crate::constant_captures1!($($($($const_capture,)*)*)*), $crate::mutable_captures0!(temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!($($($($mutable_capture,)*)*)*), $crate::mutable_captures2!($($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!($($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
     };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! safe_select_impl {
-    ( inner constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($excl_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
+    ( inner constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($excl_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
 
         {
             #[allow(nonstandard_style)]
@@ -913,6 +957,7 @@ macro_rules! safe_select_impl {
                 }
             }
 
+            // This helps with type resolution
             #[allow(nonstandard_style)]
             fn unify_fut<'a, R: 'a $(,$const_cap:'a)* $(,$mutable_cap:'a)* $(,$excl_cap:'a)*, F: FnMut(&'a Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, &mut $crate::Canceler) -> R>(_hint: *const Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*>, func: F) -> F {
                 func
@@ -944,26 +989,28 @@ macro_rules! safe_select_impl {
                         fun: unify_fut(context_hint, move|$temp, $canceler: &mut $crate::Canceler|{
                             $cancelers
                             $const_captures0
+                            $const_captures1
                             $mutable_captures0
                             $mutable_captures1
                             $excl_captures0
                             $excl_captures1
                             Some({
                                 let mut $fut_input = {$body0};
-                                $const_captures0
                                 $mutable_captures2
                                 $(
                                     // SAFETY:
                                     // Only a single thread executes poll on this future. This is guaranteed
                                     // because we take the future by `Pin<&mut Self`
-                                    let mut templ = unsafe { $temp.$cap1.lock()? };
+                                    let mut $cap1 = unsafe { $temp.$cap1.lock()? };
                                 )*
                                 async move {
+                                    $const_captures0
+                                    $const_captures1
                                     $(
                                         // SAFETY:
                                         // Only a single thread executes poll on this future. This is guaranteed
                                         // because we take the future by `Pin<&mut Self`
-                                        let $cap1 : &mut _ = unsafe { templ.get_mut() };
+                                        let $cap1 : &mut _ = unsafe { $cap1.get_mut() };
                                     )*
 
                                     $body1
@@ -974,6 +1021,7 @@ macro_rules! safe_select_impl {
                         decide: move |$temp, $result, $canceler: &mut $crate::Canceler|{
                                 $cancelers
                                 $const_captures0
+                                $const_captures1
                                 $mutable_captures0
                                 $mutable_captures1
                                 $excl_captures0

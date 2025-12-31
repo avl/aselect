@@ -1,17 +1,18 @@
 # ASelect
 
 This is a rust crate intended to provide a solution to two potential pitfalls of the
-tokio `select!`-macro. While said macro is useful, it has two slightly error-prone
+tokio `select!`-macro. While said macro is useful, it has two error-prone
 characteristics, especially when used in loops:
 
- * Each iteration of the loop will cancel all but one future.
- * Handlers with async blocks may starve all select arms.
+ * Each invocation of `select!` will cancel all but one future.
+ * Handlers with async blocks may starve all select arms (when one `select!` arm
+   becomes ready, the others are not polled until its handler completes).
 
 This crate solves this by:
 
  * Never cancelling futures (except when explicitly asked to)
  * Allowing futures to live for multiple iterations of select loops
- * Not allowing async code in handler blocks.
+ * Not allowing async code in handler blocks (only in arms).
 
 Additionally:
 

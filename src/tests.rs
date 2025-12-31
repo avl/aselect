@@ -64,6 +64,8 @@ async fn minimal_usecase() {
     println!("Produced value: {}", result);
 }
 
+// Verify that if all arms constantly cancel all other arms,
+// this doesn't lead to an infinite loop without yielding.
 #[tokio::test(start_paused = true)]
 async fn repeated_cancellation() {
     let mut fut = pin!(aselect!(
@@ -102,12 +104,14 @@ async fn repeated_cancellation() {
     }
 }
 
+// Test that all types of capture work
 #[tokio::test(start_paused = true)]
 async fn use_all_capture_types() {
 
     let counter = 0u32;
     let borrowed = "Borrowed".to_string();
     let constant: u32 = 43;
+
     let result = aselect!(
         {
             mutable(counter);
@@ -118,13 +122,15 @@ async fn use_all_capture_types() {
             {
                 dbg!(&counter, constant, &borrowed);
                 (*counter) += 1;
+
                 *borrowed? = "Set".to_string();
             },
             async |_unused, borrowed| {
                 *borrowed = "Modified".to_string();
                 sleep(Duration::from_secs(1)).await;
+                
             },
-            |time_slept| {
+            |c| {
                 dbg!(&counter, constant, &borrowed);
                 (*counter) += 1;
                 *borrowed? = "Set2".to_string();
@@ -143,13 +149,17 @@ async fn use_all_capture_types() {
             |_unused| {
                 println!("Timer 2 done");
                 // After the 10 seconds have elapsed,
+                assert_eq!(*constant, 43);
+                assert_eq!(*counter, 6);
+                assert_eq!(*borrowed.unwrap(), "Set2");
                 Some("finished")
             }
         ),
     ).await;
-    println!("Produced value: {}", result);
+    assert_eq!(result, "finished");
 }
 
+// Test that the `aselect!` object can be returned from a function.
 #[tokio::test(start_paused = true)]
 async fn test_return_future() {
 
@@ -190,6 +200,9 @@ async fn test_return_future() {
     let _t = t.next().await;
 }
 
+// If futures complete, but handler never produces a value, we should still
+// yield to the async runtime (not hog a CPU). This means timeout should be able
+// to end the execution.
 #[tokio::test]
 async fn test_no_hang_if_always_ready_and_produce_no_value() {
     let abc = "abc";
@@ -219,8 +232,9 @@ async fn test_no_hang_if_always_ready_and_produce_no_value() {
 }
 
 
+// If all async blocks are disabled, we should just be pending forever
 #[tokio::test(start_paused = true)]
-async fn test_no_hang_if_all_futures_disabled() {
+async fn test_no_hang_if_all_async_blocks_disabled() {
 
     timeout(Duration::from_secs(1000), aselect!(
             {
