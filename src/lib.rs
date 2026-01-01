@@ -66,11 +66,11 @@
 //! All `aselect!` invocations implement `Stream` (in addition to `Future`) when this
 //! feature is enabled.
 
+use core::cell::Cell;
 use core::cell::UnsafeCell;
 use core::fmt::{Debug, Formatter};
 use core::marker::PhantomData;
 use core::ptr::null_mut;
-use core::cell::Cell;
 #[cfg(feature = "futures")]
 pub use futures::Stream;
 
@@ -86,125 +86,76 @@ pub trait SelectArm<'a, CTX, TOut> {
     /// If it was ready, it may have produced a value `Some(Some(_))` or not `Some(None)`.
     /// It is guaranteed that if this method has run user-code, it returns Some.
     /// If the future was not ready, and no user code was run, `None` is returned.
-    fn do_poll(&mut self, ctx: &'a CTX, cx: &mut ::core::task::Context<'_>, canceler: &mut Canceler) -> PollResult<TOut>;
+    fn do_poll(
+        &mut self,
+        ctx: &'a CTX,
+        cx: &mut ::core::task::Context<'_>,
+        canceler: &mut Canceler,
+    ) -> PollResult<TOut>;
     fn cancel(&mut self);
 }
 
+/// A wrapper around mutable captured variables
 #[doc(hidden)]
-pub struct UnsafeCapture<'a, T: 'a> {
+pub struct MutableCapture<T> {
     value: UnsafeCell<T>,
-    phantom: PhantomData<&'a ()>,
 }
 
-// SAFETY: TODO: Is this even sound?
-unsafe impl<'a, T: Sync> Sync for UnsafeCapture<'a, T> {
+// We need Sync, because references to MutableCapture instances are held by
+// the async blocks.
+//
+// SAFETY:
+// The `mut_access` method requires the caller to ensure no concurrent access.
+// The `new` method is not marked as unsafe, allowing safe code to construct
+// instances of `Self` with arguably "wrong" Sync trait implementation.
+// However, this doesn't matter, because a Self instance can't be used for anything
+// without calling a method, and the methods are all marked unsafe.
+unsafe impl<T: Sync> Sync for MutableCapture<T> {}
 
-}
-
-
-impl<'a, T: 'a> UnsafeCapture<'a, T> {
+impl<T> MutableCapture<T> {
+    #[doc(hidden)]
     pub fn new(value: T) -> Self {
         Self {
             value: UnsafeCell::new(value),
-            phantom: PhantomData,
         }
     }
     /// # Safety
     /// The underlying captured value must still be alive, and
     /// must be mutably accessible without causing aliasing.
-    pub unsafe fn access(&self) -> UnsafeCaptureAccess<T> {
-        UnsafeCaptureAccess {
+    pub unsafe fn mut_access(&self) -> MutableCaptureGuard<T> {
+        MutableCaptureGuard {
             value: self.value.get(),
         }
     }
 }
 
 #[doc(hidden)]
-pub struct LockedCapture<'a, T: 'a> {
-    locks: UnsafeCell<bool>,
-    value: UnsafeCell<T>,
-    phantom: PhantomData<&'a ()>,
-}
-
-// SAFETY: TODO: Is this even sound?
-unsafe impl<'a, T: Sync> Sync for LockedCapture<'a, T> {
-
-}
-
-impl<'a, T: Debug> Debug for LockedCapture<'a, T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> ::core::fmt::Result {
-        write!(f, "Borrowed()")
-    }
-}
-impl<'a, T: 'a> LockedCapture<'a, T> {
-    pub fn new(value: T) -> Self {
-        Self {
-            locks: UnsafeCell::new(false),
-            value: UnsafeCell::new(value),
-            phantom: PhantomData,
-        }
-    }
-    /// # Safety
-    /// The underlying captured value must still be alive, and
-    /// must be mutably accessible without causing aliasing, and
-    /// also no concurrent access to the lock must be allowed.
-    pub unsafe fn access(&self) -> CaptureAccess<T> {
-        // SAFETY:
-        // No concurrent access to lock, guaranteed by caller
-        if unsafe { !*self.locks.get() } {
-            CaptureAccess {
-                value: self.value.get(),
-            }
-        } else {
-            CaptureAccess { value: null_mut() }
-        }
-    }
-}
-
-#[doc(hidden)]
-pub struct CaptureAccess<T> {
+pub struct MutableCaptureGuard<T> {
     value: *mut T,
 }
 
-impl<T> CaptureAccess<T> {
-    /// # Safety
-    /// The underlying captured value must still be alive, and
-    /// must be mutably accessible without causing aliasing.
-    #[allow(clippy::mut_from_ref)]
-    pub unsafe fn get(&self) -> Option<&'_ mut T> {
-        if self.value.is_null() {
-            None
-        } else {
-            // SAFETY:
-            // Caller guarantees captured value is still alive
-            Some(unsafe { &mut *self.value })
-        }
-    }
-}
-
-#[doc(hidden)]
-pub struct UnsafeCaptureAccess<T> {
-    value: *mut T,
-}
-
+// Mutable capture guards don't really have to be Send, but since
+// their type shows up in the closures stored in the select arm structs,
+// if they're not Send, the aselect expression won't be.
+//
 // SAFETY:
-// UnsafeCaptureAccess requires mutable access, and is
-// Send if T is.
-unsafe impl<T:Send> Send for UnsafeCaptureAccess<T> {}
+// MutableCaptureGuard is functionally just a `&mut T`, and
+// nothing prevents this from being Send if T is.
+unsafe impl<T: Send> Send for MutableCaptureGuard<T> {}
 
 #[doc(hidden)]
-pub struct UnsafeCaptureAccessCell<'a, T> {
+pub struct MutableCaptureCell<'a, T> {
     value: *mut T,
     phantom: PhantomData<&'a ()>,
 }
 
-impl<'a, T> UnsafeCaptureAccessCell<'a, T> {
+impl<'a, T> MutableCaptureCell<'a, T> {
     /// Access the captured variable
     ///
     /// The variable is only available within the closure.
     pub fn with<R>(&mut self, f: impl core::ops::FnOnce(&mut T) -> R) -> R {
         // SAFETY:
-        // UnsafeCaptureAccessCell can only be created by unsafe methods.
+        // MutableCaptureCell can only be created by unsafe methods.
         // The caller of these methods guarantees that the value is only accessed
         // while polling the aselect future/stream, and thus only from a single thread
         // at a time.
@@ -213,7 +164,7 @@ impl<'a, T> UnsafeCaptureAccessCell<'a, T> {
     }
 }
 
-impl<T> UnsafeCaptureAccess<T> {
+impl<T> MutableCaptureGuard<T> {
     /// # Safety
     /// The underlying captured value must still be alive, and
     /// must be mutably accessible without causing aliasing.
@@ -230,69 +181,112 @@ impl<T> UnsafeCaptureAccess<T> {
     /// The returned cell value must not escape such that it can be called
     /// from outside the polling of the aselect future.
     #[allow(clippy::mut_from_ref)]
-    pub unsafe fn get_cell(&self) -> UnsafeCaptureAccessCell<'_, T> {
-        UnsafeCaptureAccessCell {
+    pub unsafe fn get_cell(&self) -> MutableCaptureCell<'_, T> {
+        MutableCaptureCell {
             value: self.value,
             phantom: PhantomData,
         }
     }
-
-
-
 }
 
+/// A wrapper around "borrowed" captured variables (see docs)
 #[doc(hidden)]
-pub struct CaptureGuard<'a, T> {
+pub struct BorrowedCapture<T> {
+    locks: UnsafeCell<bool>,
+    value: UnsafeCell<T>,
+}
+
+// We need Sync, because references to BorrowedCapture instances are held by
+// the async blocks.
+//
+// SAFETY:
+// The `borrowed_access` method requires the caller to ensure no concurrent access.
+// The `new` method is not marked as unsafe, allowing safe code to construct
+// instances of `Self` with arguably "wrong" Sync trait implementation.
+// However, this doesn't matter, because a Self instance can't be used for anything
+// without calling a method, and the methods are all marked unsafe.
+unsafe impl<T: Sync> Sync for BorrowedCapture<T> {}
+
+impl<'a, T> Debug for BorrowedCapture<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> ::core::fmt::Result {
+        write!(f, "Borrowed()")
+    }
+}
+impl<T> BorrowedCapture<T> {
+    pub fn new(value: T) -> Self {
+        Self {
+            locks: UnsafeCell::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+    /// # Safety
+    /// The underlying captured value must still be alive, and
+    /// must be mutably accessible without causing aliasing, and
+    /// also no concurrent access to the lock must be allowed.
+    pub unsafe fn borrowed_access(&self) -> BorrowedCaptureGuard<T> {
+        // SAFETY:
+        // No concurrent access to lock, guaranteed by caller
+        if unsafe { !*self.locks.get() } {
+            BorrowedCaptureGuard {
+                value: self.value.get(),
+            }
+        } else {
+            BorrowedCaptureGuard { value: null_mut() }
+        }
+    }
+}
+
+/// Guard holding a maybe-null reference to a borrowed capture.
+#[doc(hidden)]
+pub struct BorrowedCaptureGuard<T> {
+    value: *mut T,
+}
+
+impl<T> BorrowedCaptureGuard<T> {
+    /// # Safety
+    /// The underlying captured value must still be alive, and
+    /// must be mutably accessible without causing aliasing.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn get(&self) -> Option<&'_ mut T> {
+        if self.value.is_null() {
+            None
+        } else {
+            // SAFETY:
+            // Caller guarantees captured value is still alive
+            Some(unsafe { &mut *self.value })
+        }
+    }
+}
+
+/// Guard holding an exclusive reference to a borrowed capture.
+#[doc(hidden)]
+pub struct BorrowedCaptureAsyncGuard<'a, T> {
     lock: &'a UnsafeCell<bool>,
     #[doc(hidden)]
     value: *mut T,
 }
 
+// This must be send, since async blocks keep guards alive across wait points.
+//
 // SAFETY:
-// CaptureGuard requires mutable access, and is Send.
-unsafe impl<'a, T: Send> Send for CaptureGuard<'a, T> {
+// As long as T is Send, nothing in BorrowedCaptureAsyncGuard prohibits Send.
+unsafe impl<'a, T: Send> Send for BorrowedCaptureAsyncGuard<'a, T> {}
 
-}
+// BorrowedCaptureGuard doesn't really have to be Send, but since
+// its type shows up in the closures stored in the select arm structs,
+// if it's not Send, the aselect expression won't be.
+//
+// SAFETY:
+// As long as T is Send, nothing in BorrowedCaptureGuard prohibits Send.
+unsafe impl<T: Send> Send for BorrowedCaptureGuard<T> {}
 
-// TODO: Is this correct?
-unsafe impl<'a, T: Send> Sync for CaptureGuard<'a, T> {
-
-}
-
-#[doc(hidden)]
-pub struct ConstantCapture<'a, T> {
-    value: &'a T,
-    // We need invariant variance, otherwise lifetime extension
-    // will allow some unsound code.
-    _variance: *mut T
-}
-
-impl<'a, T:'a> ConstantCapture<'a, T> {
-    #[doc(hidden)]
-    pub fn new(value: &'a T) -> Self {
-        Self {
-            value,
-            _variance: null_mut(),
-        }
-    }
-    pub fn const_access<'b>(&'b self) -> &'b T  where 'a: 'b {
-        self.value
-    }
-}
-
-impl<'a, T> Debug for CaptureGuard<'a, T>
-where
-    T: Debug,
-{
+impl<'a, T> Debug for BorrowedCaptureAsyncGuard<'a, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> ::core::fmt::Result {
-        write!(f, "CaptureGuard({:?})", self.value)
+        write!(f, "BorrowedCaptureAsyncGuard()")
     }
 }
 
-impl<'a, T> CaptureGuard<'a, T>
-where
-    T: Debug,
-{
+impl<'a, T> BorrowedCaptureAsyncGuard<'a, T> {
     /// # Safety
     /// The underlying captured value must still be alive, and
     /// must be mutably accessible without causing aliasing.
@@ -303,15 +297,15 @@ where
     }
 }
 
-impl<'a, T: 'a> LockedCapture<'a, T> {
+impl<T> BorrowedCapture<T> {
     /// # Safety
     /// The underlying captured value must still be alive, and
     /// must be mutably accessible without causing aliasing, and
     /// also no concurrent access to the lock must be allowed.
     /// Lock must only be accessed from this thread, and must
-    /// stay alive for as long as `CaptureGuard` stays alive.
+    /// stay alive for as long as `BorrowedCaptureAsyncGuard` stays alive.
     #[doc(hidden)]
-    pub unsafe fn lock(&self) -> Option<CaptureGuard<'_, T>> {
+    pub unsafe fn lock(&self) -> Option<BorrowedCaptureAsyncGuard<'_, T>> {
         // SAFETY:
         // Caller guarantees locks is not aliased.
         let locks = unsafe { &mut *self.locks.get() };
@@ -319,7 +313,7 @@ impl<'a, T: 'a> LockedCapture<'a, T> {
             return None;
         }
         *locks = true;
-        Some(CaptureGuard {
+        Some(BorrowedCaptureAsyncGuard {
             lock: &self.locks,
             // SAFETY:
             // Caller guarantees captured value is still alive
@@ -328,15 +322,38 @@ impl<'a, T: 'a> LockedCapture<'a, T> {
     }
 }
 
-impl<T> Drop for CaptureGuard<'_, T> {
+impl<T> Drop for BorrowedCaptureAsyncGuard<'_, T> {
     fn drop(&mut self) {
         // SAFETY:
-        // CaptureGuard instances are only creatable in this module, and are only created
-        // by `LockedCapture::lock`. This method guarantees `lock` stays alive.
+        // BorrowedCaptureAsyncGuard instances are only creatable in this module, and are only created
+        // by `BorrowedCapture::lock`. This method guarantees `lock` stays alive.
         unsafe { *self.lock.get() = false }
     }
 }
 
+#[doc(hidden)]
+pub struct ConstantCapture<'a, T> {
+    value: &'a T,
+    // We need invariant variance, otherwise lifetime extension
+    // will allow some unsound code.
+    _variance: *mut T,
+}
+
+impl<'a, T: 'a> ConstantCapture<'a, T> {
+    #[doc(hidden)]
+    pub fn new(value: &'a T) -> Self {
+        Self {
+            value,
+            _variance: null_mut(),
+        }
+    }
+    pub fn const_access<'b>(&'b self) -> &'b T
+    where
+        'a: 'b,
+    {
+        self.value
+    }
+}
 
 /// Trait that must be implemented by the type returned by the handler expression of a
 /// [`aselect`] arm.
@@ -368,13 +385,7 @@ pub enum Output<R> {
     /// Produce the given value as an item in the stream
     Value(R),
     /// End the stream now, without producing a value
-    Terminate
-}
-
-
-/// Terminate the stream
-pub fn terminate<R>() -> Output<R> {
-    Output::Terminate
+    Terminate,
 }
 
 #[doc(hidden)]
@@ -412,7 +423,7 @@ macro_rules! borrowed_captures0 {
             // than captures.
             // From safety perspective, we do not protect against users calling this
             // hidden macro manually.
-            let $cap = unsafe { $temp.$cap.access()};
+            let $cap = unsafe { $temp.$cap.borrowed_access()};
         )*
     };
 }
@@ -456,7 +467,7 @@ macro_rules! mutable_captures0 {
             // than captures.
             // From safety perspective, we do not protect against users calling this
             // hidden macro manually.
-            let $cap = unsafe { $temp.$cap.access()};
+            let $cap = unsafe { $temp.$cap.mut_access()};
         )*
     };
 }
@@ -480,7 +491,7 @@ macro_rules! mutable_captures1 {
 macro_rules! mutable_captures2 {
     ( $temp: ident, $($cap: ident,)*) => {
         $(
-            let $cap = unsafe { $temp.$cap.access()};
+            let $cap = unsafe { $temp.$cap.mut_access()};
         )*
     };
 }
@@ -555,13 +566,12 @@ macro_rules! define_stream_impl {
 #[doc(hidden)]
 pub enum PollResult<T> {
     Result(T),
-    Pending(bool/*future created*/),
+    Pending(bool /*future created*/),
     /// Future ran to completion, but no output value was produced
     Inhibited,
     Disabled,
-    EndStream
+    EndStream,
 }
-
 
 #[doc(hidden)]
 #[derive(Debug)]
@@ -572,7 +582,9 @@ pub struct Canceler {
 impl Canceler {
     #[doc(hidden)]
     pub fn new() -> Canceler {
-        Canceler { canceled: Cell::new(0) }
+        Canceler {
+            canceled: Cell::new(0),
+        }
     }
 
     #[doc(hidden)]
@@ -582,7 +594,7 @@ impl Canceler {
 
     #[doc(hidden)]
     pub fn canceled(&self, i: u32) -> bool {
-        (self.canceled.get() & (1<<i)) != 0
+        (self.canceled.get() & (1 << i)) != 0
     }
 
     /// Cancel the select arm with the given index.
@@ -593,18 +605,15 @@ impl Canceler {
             panic!("aselect only supports canceling the first 64 arms of a aselect invocation.");
         }
         let val = self.canceled.get();
-         self.canceled.set(val |  1 << index);
+        self.canceled.set(val | 1 << index);
     }
 }
 
-
 #[doc(hidden)]
-pub struct CancelerWrapper<'a>  {
+pub struct CancelerWrapper<'a> {
     canceler: &'a Canceler,
     index: u32,
 }
-
-
 
 impl Debug for CancelerWrapper<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> ::core::fmt::Result {
@@ -622,7 +631,6 @@ impl CancelerWrapper<'_> {
         self.canceler.cancel(self.index);
     }
 }
-
 
 /// Evaluate multiple different async operations concurrently.
 ///
@@ -846,22 +854,22 @@ macro_rules! aselect {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! safe_select_impl {
-    ( constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($excl_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$mutable_captures3: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
+    ( constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($borrowed_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$mutable_captures3: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
 
         {
             #[allow(nonstandard_style)]
             #[allow(unused)]
-            struct Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$excl_cap)*> {
+            struct Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$borrowed_cap)*> {
                 phantom: ::core::marker::PhantomData<&'a()>,
-                $($excl_cap: $crate::LockedCapture<'a, $excl_cap>, )*
-                $($mutable_cap: $crate::UnsafeCapture<'a, $mutable_cap>, )*
+                $($borrowed_cap: $crate::BorrowedCapture<$borrowed_cap>, )*
+                $($mutable_cap: $crate::MutableCapture<$mutable_cap>, )*
                 $($const_cap: $const_cap, )*
             }
 
             let context = Context {
                 phantom: ::core::marker::PhantomData,
-                $($excl_cap: $crate::LockedCapture::new($excl_cap), )*
-                $($mutable_cap: $crate::UnsafeCapture::new($mutable_cap), )*
+                $($borrowed_cap: $crate::BorrowedCapture::new($borrowed_cap), )*
+                $($mutable_cap:$crate::MutableCapture::new($mutable_cap),)*
                 $($const_cap: $const_cap, )*
             };
 
@@ -1089,7 +1097,7 @@ macro_rules! safe_select_impl {
                 phantom: ::core::marker::PhantomData,
                 $(
                 #[allow(unused)]
-                $name: $name::new(&context, move|$temp, $canceler: &mut $crate::Canceler|{
+                $name: $name::new(&context, move|$temp, $canceler: &mut $crate::Canceler| {
                         $cancelers
                         $const_captures0
                         $const_captures1
@@ -1103,7 +1111,7 @@ macro_rules! safe_select_impl {
                                 // SAFETY:
                                 // Only a single thread executes poll on this future. This is guaranteed
                                 // because we take the future by `Pin<&mut Self`
-                                let mut $cap1 : $crate::CaptureGuard<_> = unsafe { $temp.$cap1.lock()? };
+                                let mut $cap1 : $crate::BorrowedCaptureAsyncGuard<_> = unsafe { $temp.$cap1.lock()? };
                             )*
                             async move {
                                 $const_captures0
@@ -1140,7 +1148,5 @@ macro_rules! safe_select_impl {
     }
 }
 
-
 #[doc = include_str!("../ASYNC1.md")]
 pub mod patterns {}
-

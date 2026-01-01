@@ -1,5 +1,5 @@
-use futures::StreamExt;
 use aselect::aselect;
+use futures::StreamExt;
 use std::pin::pin;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -45,7 +45,7 @@ async fn main() {
                     return None;
                 }
             },
-            async |_input, server| { server.as_mut().unwrap().accept().await.map(|x| x.0) },
+            async |_setup, server| { server.as_mut().unwrap().accept().await.map(|x| x.0) },
             |accept_result| {
                 match accept_result {
                     Ok(connection) => {

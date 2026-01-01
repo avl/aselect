@@ -1,12 +1,11 @@
+use aselect::aselect;
+use futures::StreamExt;
 use std::pin::pin;
 use std::time::Duration;
-use futures::StreamExt;
 use tokio::time::{sleep, Instant};
-use aselect::aselect;
 
 #[tokio::main]
 async fn main() {
-
     let counter = 0u32;
     let mut stream = pin!(aselect!(
         {

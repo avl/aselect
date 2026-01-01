@@ -21,7 +21,7 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
         },
         read(
             {},
-            async |_temp, reader| {
+            async |_setup, reader| {
                 read_command(reader).await
             },
             |cmd| {
@@ -72,7 +72,7 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
                 }
                 *perform_measurement = false;
             },
-            async |_temp|{
+            async |_setup|{
                 measure_temperature().await
             },
             |temperature|
@@ -84,7 +84,7 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
         alarm(
             {
             },
-            async |_temp| {
+            async |_setup| {
                 wait_temperature_alarm().await
             },
             |temperature|{
@@ -146,7 +146,7 @@ Now, let's look at the first select arm (commented):
 ```rust 
     read(
         {}, //Setup
-        async |_temp, reader| { //Async block
+        async |_setup, reader| { //Async block
             read_command(reader).await
         },
         |cmd| { // Handler
@@ -246,7 +246,7 @@ Do not return a result.
             }
             *perform_measurement = false;
         },
-        async |_temp|{
+        async |_setup|{
             measure_temperature().await
         },
         |temperature|
@@ -266,7 +266,7 @@ A response with the produced temperature is added to `queued_responses`.
     alarm(
         {
         },
-        async |_temp| {
+        async |_setup| {
             wait_temperature_alarm().await
         },
         |temperature|{

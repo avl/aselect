@@ -1,19 +1,17 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+use crate::aselect;
 use core::pin::pin;
-use crate::{aselect};
 use futures::{Stream, StreamExt};
-use tokio::time::{sleep, timeout, Instant};
-use std::{println};
 use std::future::Future;
+use std::println;
 use std::string::ToString;
 use std::task::{Context, Waker};
 use std::time::Duration;
-use tokio::net::TcpStream;
+use tokio::time::{sleep, timeout, Instant};
 
 #[tokio::test(start_paused = true)]
 async fn minimal_usecase() {
-
     let counter = 0u32;
     let result = aselect!(
         {
@@ -60,7 +58,8 @@ async fn minimal_usecase() {
                 Some("finished")
             }
         ),
-    ).await;
+    )
+    .await;
     println!("Produced value: {}", result);
 }
 
@@ -69,8 +68,7 @@ async fn minimal_usecase() {
 #[tokio::test(start_paused = true)]
 async fn repeated_cancellation() {
     let mut fut = pin!(aselect!(
-        {
-        },
+        {},
         timer1(
             {
                 timer2.cancel();
@@ -107,14 +105,12 @@ async fn repeated_cancellation() {
 // Test that all types of capture work
 #[tokio::test(start_paused = true)]
 async fn use_all_capture_types() {
-
     let owned_constant: u32 = 44;
 
     let counter = 0u32;
     let borrowed = "Borrowed".to_string();
     let constant: u32 = 43;
     let ref_constant = &owned_constant;
-    
 
     let result = aselect!(
         {
@@ -130,12 +126,11 @@ async fn use_all_capture_types() {
 
                 *borrowed? = "Set".to_string();
             },
-            async |_unused, borrowed| {
+            async |_setup, borrowed| {
                 *borrowed = "Modified".to_string();
                 counter.with(|cnt| *cnt += 1);
 
                 sleep(Duration::from_secs(1)).await;
-
             },
             |c| {
                 (*counter) += 1;
@@ -147,9 +142,7 @@ async fn use_all_capture_types() {
             }
         ),
         timer2(
-            {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1))
-            },
+            { tokio::time::sleep(tokio::time::Duration::from_secs(1)) },
             async |sleep_fut| {
                 sleep_fut.await;
                 assert_eq!(**ref_constant, 44u32);
@@ -167,15 +160,15 @@ async fn use_all_capture_types() {
                 Some("finished")
             }
         ),
-    ).await;
+    )
+    .await;
     assert_eq!(result, "finished");
 }
 
 // Test that the `aselect!` object can be returned from a function.
 #[tokio::test(start_paused = true)]
 async fn test_return_future() {
-
-    fn subfunc() -> impl Stream<Item = ()> + Future<Output=()> {
+    fn subfunc() -> impl Stream<Item = ()> + Future<Output = ()> {
         let value = 42u32;
         let constval = 1;
         let mutval = 2;
@@ -221,7 +214,9 @@ async fn test_no_hang_if_always_ready_and_produce_no_value() {
     let def = "def";
     let ghi = "ghi";
 
-    timeout(Duration::from_millis(10), aselect!(
+    timeout(
+        Duration::from_millis(10),
+        aselect!(
             {
                 borrowed(abc);
                 constant(def);
@@ -236,47 +231,41 @@ async fn test_no_hang_if_always_ready_and_produce_no_value() {
                 async |fut_input, abc| {
                     let ghi = ghi;
                 },
-                |conn2| {
-
-                }
+                |conn2| {}
             ),
-        )).await.unwrap_err();
+        ),
+    )
+    .await
+    .unwrap_err();
 }
-
 
 // If all async blocks are disabled, we should just be pending forever
 #[tokio::test(start_paused = true)]
 async fn test_no_hang_if_all_async_blocks_disabled() {
-
-    timeout(Duration::from_secs(1000), aselect!(
-            {
-            },
+    timeout(
+        Duration::from_secs(1000),
+        aselect!(
+            {},
             conn(
                 {
                     return None;
                 },
-                async |fut_input| {
-                },
-                |conn2| {
-                }
+                async |fut_input| {},
+                |conn2| {}
             ),
-        )).await.unwrap_err();
+        ),
+    )
+    .await
+    .unwrap_err();
 }
-
-
-
-
 
 // Test that all types of capture work
 #[tokio::test(start_paused = true)]
 async fn test_cancel_works() {
-
     let result = aselect!(
-        {
-        },
+        {},
         timer1(
-            {
-            },
+            {},
             async |_unused| {
                 sleep(Duration::from_secs(1)).await;
             },
@@ -286,28 +275,81 @@ async fn test_cancel_works() {
             }
         ),
         timer2(
-            {
-                tokio::time::sleep(tokio::time::Duration::from_secs(10))
-            },
+            { tokio::time::sleep(tokio::time::Duration::from_secs(10)) },
             async |sleep_fut| {
                 sleep_fut.await;
             },
-            |_unused| {
-                Some("timer2")
-            }
+            |_unused| { Some("timer2") }
         ),
         timer3(
-            {
-                tokio::time::sleep(tokio::time::Duration::from_secs(20))
-            },
+            { tokio::time::sleep(tokio::time::Duration::from_secs(20)) },
             async |sleep_fut| {
                 sleep_fut.await;
             },
-            |_unused| {
-                Some("timer3")
-            }
+            |_unused| { Some("timer3") }
         ),
-    ).await;
+    )
+    .await;
     assert_eq!(result, "timer3"); //timer2 is cancelled every second
 }
 
+#[tokio::test(start_paused = true)]
+async fn nested() {
+    let result = aselect!(
+        {},
+        outer1(
+            {},
+            async |_sleep| {
+                aselect!(
+                    {}
+                    inner1(
+                        {},
+                        async |_temp| {
+                            42u32
+                        },
+                        |result|{
+                            Some(result)
+                        }
+                    )
+                )
+                .await
+            },
+            |result| { Some(result) }
+        ),
+    )
+    .await;
+    assert_eq!(result, 42u32);
+}
+
+#[tokio::test(start_paused = true)]
+async fn nested_stream() {
+    fn inner() -> impl Stream<Item = u32> {
+        aselect!(
+            {}
+            inner1(
+                {},
+                async |_temp| {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    42u32
+                },
+                |result|{
+                    Some(result)
+                }
+            )
+        )
+    }
+    let inner_stream = pin!(inner());
+
+    let mut outer = pin!(aselect!(
+        {
+            borrowed(inner_stream);
+        },
+        outer1(
+            {},
+            async |_setup, inner_stream| { inner_stream.next().await.unwrap() },
+            |result| { Some(result) }
+        ),
+    ));
+    assert_eq!(outer.next().await.unwrap(), 42u32);
+    assert_eq!(outer.next().await.unwrap(), 42u32);
+}

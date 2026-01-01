@@ -1,4 +1,4 @@
-use aselect::{aselect};
+use aselect::aselect;
 
 #[tokio::main]
 async fn main() {
@@ -9,33 +9,33 @@ async fn main() {
         },
         accepted(
             {
-                let mut server : &mut bool = server;
+                let mut server: &mut bool = server;
                 if !*server {
                     println!("Not time to be server");
                     return None;
                 };
                 println!("Server");
             },
-            async | _input |{
+            async |_setup| {
                 println!("Do server stuff");
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 println!("Done server stuff");
             },
-            |result|{
+            |result| {
                 *server = false;
                 println!("Server future completed");
                 None
             }
         ),
         connection_result(
-             {
-                 if *server {
+            {
+                if *server {
                     println!("Not time to be client");
                     return None;
                 };
                 println!("Client");
             },
-            async | _input |{
+            async |_setup| {
                 println!("Do client stuff");
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 println!("Done client stuff");
@@ -48,7 +48,7 @@ async fn main() {
         ),
         timer(
             {},
-            async | _input | {
+            async |_setup| {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1000)).await;
             },
             |timer| {

@@ -1,4 +1,4 @@
-use aselect::{aselect};
+use aselect::aselect;
 use tokio::net::TcpStream;
 use tokio::signal;
 
@@ -7,26 +7,27 @@ async fn main() {
     let connection_attempts = 0u32;
     {
         aselect!(
-            {mutable(connection_attempts);},
+            {
+                mutable(connection_attempts);
+            },
             ctrl_c(
-                 {},
-                async | _fut | { signal::ctrl_c().await },
+                {},
+                async |_fut| { signal::ctrl_c().await },
                 |ctrl_c_result| {
                     // Cancel the 'conn' arm.
                     conn.cancel();
                     println!(
                         "ctrl-c result: {:?}, after {} attempts",
-                        ctrl_c_result,
-                        *connection_attempts
+                        ctrl_c_result, *connection_attempts
                     );
                     (*connection_attempts > 5).then_some(())
                 }
             ),
             conn(
-                 {
+                {
                     *connection_attempts += 1;
                 },
-                async | _fut | {
+                async |_setup| {
                     println!("Reconnecting");
                     let conn = TcpStream::connect(
                         std::env::args()

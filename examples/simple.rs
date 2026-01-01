@@ -1,6 +1,6 @@
-use std::pin::pin;
+use aselect::aselect;
 use futures::StreamExt;
-use aselect::{aselect};
+use std::pin::pin;
 
 #[tokio::main]
 async fn main() {
@@ -10,9 +10,7 @@ async fn main() {
             mutable(counter);
         },
         timer(
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(1))
-            },
+            { tokio::time::sleep(std::time::Duration::from_millis(1)) },
             async |fut1| {
                 fut1.await;
             },
@@ -22,15 +20,11 @@ async fn main() {
             }
         ),
         output(
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(3))
-            },
+            { tokio::time::sleep(std::time::Duration::from_millis(3)) },
             async |fut2| {
                 fut2.await;
             },
-            |result| {
-                Some(*counter)
-            }
+            |result| { Some(*counter) }
         ),
     ));
     while let Some(item) = stream.next().await {
