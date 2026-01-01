@@ -39,6 +39,8 @@ jobs:
         run: rustup toolchain install nightly
       - name: Build (all features)
         run: cargo +nightly build --all-features
+      - name: Miri
+        run: cargo +nightly miri test
       - name: Cargo doc
         run: cargo +stable doc --workspace
 
