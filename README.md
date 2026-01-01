@@ -26,7 +26,7 @@ Additionally, aselect:
 
 ## Motivation
 
-See [motivating example](ASYNC1.md) for a detailed example showcasing the problems aselect is meant to solve.
+See [motivating example](MOTIVATION.md) for a detailed example showcasing the problems aselect is meant to solve.
 
 ## Example
 

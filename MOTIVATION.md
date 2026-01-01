@@ -384,7 +384,7 @@ Java does not support it: <https://docs.oracle.com/javase/tutorial/essential/con
 
 # Using the aselect library
 
-See [aselect](ASYNC2.md) for an implementation of the above example code using aselect.
+See [aselect](EXAMPLE.md) for an implementation of the above example code using aselect.
 
 
 

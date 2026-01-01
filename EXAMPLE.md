@@ -1,7 +1,6 @@
 # Using aselect
 
-Before reading this, see  [part 1](ASYNC1.md) for a description of the problem being solved.
-
+Before reading this, see [part 1](MOTIVATION.md) for a description of the problem being solved.
 
 The following rust code, using the aselect-library, avoids all problems of the previous code.
 

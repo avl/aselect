@@ -207,7 +207,7 @@ pub struct BorrowedCapture<T> {
 // without calling a method, and the methods are all marked unsafe.
 unsafe impl<T: Sync> Sync for BorrowedCapture<T> {}
 
-impl<'a, T> Debug for BorrowedCapture<T> {
+impl<T> Debug for BorrowedCapture<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> ::core::fmt::Result {
         write!(f, "Borrowed()")
     }
@@ -1148,5 +1148,5 @@ macro_rules! safe_select_impl {
     }
 }
 
-#[doc = include_str!("../ASYNC1.md")]
+#[doc = include_str!("../MOTIVATION.md")]
 pub mod patterns {}
