@@ -52,7 +52,6 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
                 }
                  None
             }
-
         ),
         set_power(
             {
@@ -100,6 +99,8 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
 
 Let's go through it part-by-part.
 
+## Shared State
+
 First, we define some state:
 
 ```rust
@@ -113,8 +114,10 @@ First, we define some state:
  * `perform_measurement` is set to true whenever a measurement has been desired.
  * `queued_responses` contains responses that have been created, but not yet transmitted to the client.
 
-Then we invoke the `aselect` macro:
 
+## Macro invocation
+
+Then we invoke the `aselect` macro:
 
 ```rust
     aselect!(
@@ -137,28 +140,30 @@ borrow rules.
 
 Now, let's look at the first select arm (commented):
 
+## Read arm
+
 
 ```rust 
-        read(
-            {}, //Setup
-            async |_temp, reader| { //Async block
-                read_command(reader).await
-            },
-            |cmd| { // Handler
-                match cmd {
-                    Ok(Command::SetPower(power)) => {
-                        *new_power = Some(power);
-                    }
-                    Ok(Command::QueryTemperature) => { // Query temperature
-                        *perform_measurement = true;
-                    }
-                    Err(err) => {
-                        return Some(Output::Value(Err(err)));
-                    }
+    read(
+        {}, //Setup
+        async |_temp, reader| { //Async block
+            read_command(reader).await
+        },
+        |cmd| { // Handler
+            match cmd {
+                Ok(Command::SetPower(power)) => {
+                    *new_power = Some(power);
                 }
-                None
+                Ok(Command::QueryTemperature) => { // Query temperature
+                    *perform_measurement = true;
+                }
+                Err(err) => {
+                    return Some(Output::Value(Err(err)));
+                }
             }
-        ),
+            None
+        }
+    ),
 ```
 The arm is named `read`, and has three blocks:
  * 
@@ -181,7 +186,107 @@ to be cancelation safe.
 
 The next block is:
 
-TODO! Will be continued!
+## Write arm
+
+```rust
+    write(
+        { // Setup
+            queued_responses.pop_front()?
+        },
+        async |response, writer| { // Async block
+            write_response(writer, response).await
+        },
+        |result| { // Handler
+            if let Err(err) = result {
+                return Some(Output::Value(Err(err)));
+            }
+             None
+        }
+    ),
+
+```
+
+We pop the first queued command. If none exists, we return `None`. Returning None from a setup block disables
+the async block. If a queued response exists, it will be given as the first parameter to the async block (`response`).
+The async block calls the `write_response` async method.
+
+The result of the async block is then given to the handler. If the result is an error, the handler returns an result,
+causing the whole `aselect` macro invocation to complete with an error.
+
+The next block is:
+
+## Set Power arm
+
+```rust
+    set_power(
+        {
+            new_power.take()?
+        },
+        async |power|{
+            set_heater_power(power)
+        },
+        |_result|
+        {
+            None
+        }
+    ),
+```
+
+If the option `new_power` holds a value, enable the async block and call `set_heater_power`.
+Do not return a result.
+
+
+## Measure arm
+
+```rust
+    measure(
+        {
+            if !*perform_measurement {
+                return None;
+            }
+            *perform_measurement = false;
+        },
+        async |_temp|{
+            measure_temperature().await
+        },
+        |temperature|
+        {
+            queued_responses.push_back(Response::Temperature(temperature));
+            None
+        }
+    ),
+```
+
+If `perform_measurement` is false, disable the async block. Otherwise execute `measure_temperature().await`.
+A response with the produced temperature is added to `queued_responses`.
+
+## Alarm arm
+
+```rust
+    alarm(
+        {
+        },
+        async |_temp| {
+            wait_temperature_alarm().await
+        },
+        |temperature|{
+            queued_responses.push_back(Response::Temperature(temperature));
+            None
+        }
+    )
+```
+
+Run the `wait_temperature_alarm` method. Whenever it completes, add a queued response.
+
+## Conclusion
+
+The code presented here has the following guarantees:
+
+ * All the futures are always polled
+ * Futures are never canceled unless an error occurs and we exit the loop
+
+It is still relatively convenient and doesn't require any Mutexes, RefCells or other mechanisms to maintain
+shared state. Cancel safety need mostly not be considered, since cancellation doesn't occur during regular use. 
 
 
 
