@@ -96,6 +96,12 @@ pub struct UnsafeCapture<'a, T: 'a> {
     phantom: PhantomData<&'a ()>,
 }
 
+// SAFETY: TODO: Is this even sound?
+unsafe impl<'a, T: Sync> Sync for UnsafeCapture<'a, T> {
+
+}
+
+
 impl<'a, T: 'a> UnsafeCapture<'a, T> {
     pub fn new(value: T) -> Self {
         Self {
@@ -119,6 +125,12 @@ pub struct LockedCapture<'a, T: 'a> {
     value: UnsafeCell<T>,
     phantom: PhantomData<&'a ()>,
 }
+
+// SAFETY: TODO: Is this even sound?
+unsafe impl<'a, T: Sync> Sync for LockedCapture<'a, T> {
+
+}
+
 impl<'a, T: Debug> Debug for LockedCapture<'a, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> ::core::fmt::Result {
         write!(f, "Borrowed()")
@@ -175,6 +187,11 @@ pub struct UnsafeCaptureAccess<T> {
     value: *mut T,
 }
 
+// SAFETY:
+// UnsafeCaptureAccess requires mutable access, and is
+// Send if T is.
+unsafe impl<T:Send> Send for UnsafeCaptureAccess<T> {}
+
 #[doc(hidden)]
 pub struct UnsafeCaptureAccessCell<'a, T> {
     value: *mut T,
@@ -229,6 +246,17 @@ pub struct CaptureGuard<'a, T> {
     lock: &'a UnsafeCell<bool>,
     #[doc(hidden)]
     value: *mut T,
+}
+
+// SAFETY:
+// CaptureGuard requires mutable access, and is Send.
+unsafe impl<'a, T: Send> Send for CaptureGuard<'a, T> {
+
+}
+
+// TODO: Is this correct?
+unsafe impl<'a, T: Send> Sync for CaptureGuard<'a, T> {
+
 }
 
 #[doc(hidden)]
@@ -1075,7 +1103,7 @@ macro_rules! safe_select_impl {
                                 // SAFETY:
                                 // Only a single thread executes poll on this future. This is guaranteed
                                 // because we take the future by `Pin<&mut Self`
-                                let mut $cap1 = unsafe { $temp.$cap1.lock()? };
+                                let mut $cap1 : $crate::CaptureGuard<_> = unsafe { $temp.$cap1.lock()? };
                             )*
                             async move {
                                 $const_captures0
