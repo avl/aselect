@@ -374,7 +374,6 @@ polled, it may have executed `PRECISE_MEASUREMENT_MUTEX.lock().await`, but not
 completed `sleep(Duration::from_millis(1)).await;`. Nominally, the sleep returns within 1 ms, plus minus
 some jitter. But if the future isn't polled, even the sleep will never complete.
 
-
 # What we've learned
 
 This post has illustrated three related, but different problems:
@@ -403,11 +402,36 @@ For C#, the ability has been deprecated for a long time, see:
 <https://learn.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/5.0/thread-abort-obsolete>
 Java does not support it: <https://docs.oracle.com/javase/tutorial/essential/concurrency/interrupt.html>
 
+# In the real world
+
+The example presented in this text is simplified. However, the problems illustrated can happen in more
+realistic code bases too. Whenever a single task is expected to react to multiple different stimuli
+and the code is composed of async methods calling other async methods, these issues can arise.
+
+# Other viewpoints
+
+## Cancellation isn't that bad
+It could be argued that cancellation isn't to be avoided. The programmer just has to ensure that
+methods are cancel safe. However, this is often quite difficult in practice. The developer has to
+consider the effect of stopping execution at every `.await` point in a cancel safe method.
+
+## Not polling futures isn't that bad
+It could be argued that it's okay to have futures that are not being polled. However, this brings
+a similar amount of cognitive overhead. It means that even sleeps and timeouts cannot be taken for granted.
+The programmer has to consider every `.await` point to last an unbounded amount of time.
+
+It can be argued that this is the case even if futures are constantly polled. After all, there are no
+hard performance guarantees in most rust environments. However, without keeping track of which futures are polled,
+it can be hard to reason about if a particular program will complete or not. This is especially true if futures
+not being polled hold locks. But the same goes for other types of synchronization primitives. For example, a
+future blocking on an mpsc channel send may cause starvation in other parts of the system, and will never
+complete if the future isn't being polled.
+ 
+
+
 # Using the aselect library
 
 See [aselect](EXAMPLE.md) for an implementation of the above example code using aselect.
-
-
 
 
 
