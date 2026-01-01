@@ -620,7 +620,7 @@ impl CancelerWrapper<'_> {
 ///             println!("Counter = {:?}", counter);
 ///             *counter += 1;
 ///             // Create a future. Will be available to async block below.
-///             sleep(Duration::from_millis(300))
+///             sleep(Duration::from_millis(30))
 ///         },
 ///         async |sleep| { // Async block
 ///             // 'sleep' is the future created above
@@ -641,7 +641,7 @@ impl CancelerWrapper<'_> {
 ///     timer2(
 ///         { // Setup
 ///             // Similar to above, but now sleep 10 seconds
-///             tokio::time::sleep(tokio::time::Duration::from_secs(1))
+///             tokio::time::sleep(tokio::time::Duration::from_millis(100))
 ///         },
 ///         async |sleep| { // Async block
 ///             sleep.await;
@@ -1111,3 +1111,8 @@ macro_rules! safe_select_impl {
         }
     }
 }
+
+
+#[doc = include_str!("../ASYNC1.md")]
+pub mod patterns {}
+

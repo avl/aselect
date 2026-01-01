@@ -24,6 +24,10 @@ Additionally, aselect:
  * Allows sharing mutable state between select arms
  * Implements [Stream](https://docs.rs/futures/latest/futures/prelude/trait.Stream.html).
 
+## Motivation
+
+See [motivating example](ASYNC1.md) for a detailed example showcasing the problems aselect is meant to solve.
+
 ## Example
 
 ```rust
