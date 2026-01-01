@@ -1,24 +1,28 @@
-# Async Design Patterns with aselect
+# Async application main loops
 
-This document takes a look at a few design patterns for async rust programs, and how they can be expressed
-using the `aselect` crate. 
+## Background
 
-## Scenario 1
+This document takes a look at an async rust application and illustrates a few pitfalls. In part 2,
+we take a look at how these challenges can be overcome using the "aselect" crate.
+
+## Scenario
 
 Let's say you're writing a server for an embedded system. The system is controlled through a custom
-protocol built on top of TCP. The system has a set of actuators and sensors. The sensors produce
-values that are transmitted to clients over TCP.
+protocol built on top of TCP. The hardware has a temperature sensor and a heater. A client should be able
+to read the temperature and control the heater.
 
-We'll choose a "one task per client" approach. Let's start by writing a simple server to control a heater.
-Note, this example is simplified. 
+Let's start by writing a simple server. We'll assume there's only a single client at a time, for this example.
+
+### A starting point
+
+An initial minimal main loop might look something like this:
 
 ```rust
-
-async fn set_heater_power(power: u8) {}
-
 use tokio::net::TcpStream;
 use tokio::io::AsyncReadExt;
 use std::io::Result;
+
+async fn set_heater_power(power: u8) { /* implementation */ }
 
 async fn run_server(stream: &mut TcpStream) -> Result<()> {
     let (mut reader, writer) = stream.split();
@@ -39,9 +43,11 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
 }
 ```
 
-The above example works reliably. Clients write a 1-byte command 1 to adjust power, followed by a parameter with 
+The above example works reliably. Clients write a 1-byte command to adjust power, followed by a 1-byte parameter with 
 the desired power. While `set_heater_power` is executing, no further commands are processed. However,
-this seems reasonable.
+this is acceptable for now.
+
+### Adding a query feature
 
 Now, let's add a way to query the current temperature:
 
@@ -79,13 +85,19 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
 }
 ```
 
-Upon receiving a 2 from the client, the server responds with the current temperature.
+This adds a second type of command, encoded as a byte with value '2'. Upon receiving such a command, the server
+writes a magic byte (2) back, followed by the temperature encoded in a byte. Let's not worry about units or 
+data types for physical quantities for this example.
+
+### Adding an alarm feature
 
 Now, let's add an alarm feature. Whenever the temperature exceeds 100, the client should be notified immediately,
 without having to perform a request. To achieve this, we need a primitive that allows us to monitor two different
-futures for completion.
+futures for completion: The temperature (from the hardware itself), and incoming requests (from the client).
 
 Tokio provides such a primitive, `tokio::select`:
+
+Our program might now looks something like this:
 
 ```rust
 
@@ -130,16 +142,22 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
 }
 ```
 
-The above program is likely to work well in practice, but it has a subtle bug: If `wait_temperature_alarm`
+#### A potential bug
+
+The above program is likely to work well in practice, but it potentially has a subtle bug: If `wait_temperature_alarm`
 completes frequently, it may end up saturating the TcpStream send buffer, effectively blocking on `writer.write_u8`.
 If the client has somehow managed to fill up its send-queue too, the system will deadlock. This may be quite unlikely
 to happen for this simple example, but as a system grows more complex, this type of issue will be more likely.
 
 A similar potential misfeature is that while `set_heater_power` is executing, the alarm feature is not active.
 
-Now, let's leave these concerns for a while and consider cleaning up the program a little. Mixing protocol parsing
-and logic like this can make the program harder to reason about. So let's abstract the protocol:
+Both these limitations may be perfectly fine, depending on circumstances such as buffer sizes and client behavior. 
 
+### Refactoring
+
+Now, let's leave these concerns for a while and consider cleaning up the program a little. Mixing protocol parsing
+and logic like this can make the program harder to reason about. So let's abstract the protocol parsing into
+separate functions:
 
 
 ```rust
@@ -211,13 +229,15 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
 
 Nice! Protocol parsing is no longer intertwined with program logic.
 
-However, the program now contains a pretty sever bug. If the temperature changes while a SetPower command is being
+However, the program now contains a pretty severe bug. If the temperature changes while a SetPower command is being
 read, the future returned by `read_command` will be canceled. But it may already have consumed the first byte of
-the 2-byte on-wire packet. In the next iteration of the loop, the 'power' parameter byte will now be interpreted
-as a new command. This type of protocol error is called a framing error.
+the 2-byte on-wire packet. In the next iteration of the loop, the 'power' parameter will now be interpreted
+as a new command.
 
-The cause of this framing error in this case is that `read_command` is not "cancel safe". For an excellent
-article on cancellation safety, see: <https://rfd.shared.oxide.computer/rfd/400>.
+The cause of this framing error is that `read_command` is not "cancel safe". For an excellent
+article on cancel safety, see: <https://rfd.shared.oxide.computer/rfd/400>.
+
+### Canceling temperature reading 
 
 Let's continue this slightly contrived journey, and look at the method `wait_temperature_change`.
 Imagine that its innards perform hardware operations like this:
@@ -251,7 +271,6 @@ leave the current enabled for an unbounded amount of time. Depending on the chem
 conceivably be harmless or catastrophic (I'm not a chemist - maybe you can already tell).
 
 To avoid the possibility of this unwanted cancellation, let's modify the main program like this:
-
 
 
 ```rust
@@ -314,6 +333,8 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
 The `alarm` future is now never canceled. Instead, the future is polled to completion. However, the program, as written,
 is still not great. Even though the `wait_temperature_alarm` future isn't ever canceled, it is still not scheduled
 while `write_response` executes.
+
+### Async code and resource ownership
 
 Now, let's imagine that our hypothetical machine has other features,
 and some of these features interfere with the precise temperature measurement. For this reason, we modify
