@@ -40,7 +40,7 @@ jobs:
       - name: Build (all features)
         run: cargo +nightly build --all-features
       - name: Miri
-        run: cargo +nightly miri test
+        run: rustup component add --toolchain nightly miri && cargo +nightly miri test
       - name: Cargo doc
         run: cargo +stable doc --workspace
 
