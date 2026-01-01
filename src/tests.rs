@@ -311,11 +311,3 @@ async fn test_cancel_works() {
     assert_eq!(result, "timer3"); //timer2 is cancelled every second
 }
 
-#[tokio::test(start_paused = true)]
-async fn scratch() {
-    use tokio::io::AsyncReadExt;
-    let mut stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
-    let (mut reader, writer) = stream.split();
-    let cmd: u8 = reader.read_u8().await.unwrap();
-
-}
