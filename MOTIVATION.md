@@ -394,16 +394,17 @@ can happen in real rust code, and worse, requires non-trivial non-local analysis
 shown isn't buggy in itself, it's just not cancellation safe. Determining if a piece of async code may
 be canceled is not possible with only local information. 
 
-The first and third points above can be viewed as being caused direction by a failure to poll futures
+The first and third points above can be viewed as being caused directly by a failure to poll futures
 to completion.
 
 I'd like to propose the following rule: Futures should always be polled continuously, to completion, except
-in exceptional circumstances, such as when canceled intentionally (e.g timeouts). Some async API:s require 
-canceling futures to implement timeout functionality. The amount of canceling that is needed can be affected 
-by API design. For example, tokio `CancellationToken` can be used to be able to cancel an operation
-without canceling a future.
+in exceptional circumstances, such as when canceled intentionally (e.g timeouts). 
 
-See part 2 for an implementation using a single task without cancellation.
+Some async API:s require canceling futures to implement timeout functionality. The amount of canceling that is 
+needed can be affected by API design. For example, tokio `CancellationToken` can be used to be able to cancel an 
+operation without canceling a future.
+
+See [part 2](EXAMPLE.md) for an implementation using a single task without cancellation.
 
 There's an interesting parallel here to aborting threads. The programming community has long since
 come to the conclusion that the ability to abort threads "from the outside" causes more harm than benefit.
@@ -431,14 +432,16 @@ be able to receive events from more than one source.
 
 The example presented in this text is simplified. However, the problems illustrated can happen in more
 realistic code bases too. Whenever a single task is expected to react to multiple different stimuli
-and the code is composed of async methods calling other async methods, these issues can arise.
+and the code is composed of async methods calling other async methods (or other non-cancel safe futures are
+involved), these issues can arise.
 
 # Other viewpoints
 
 ## Cancellation isn't that bad
 It could be argued that cancellation isn't to be avoided. The programmer just has to ensure that
 methods are cancel safe. However, this is often quite difficult in practice. The developer has to
-consider the effect of stopping execution at every `.await` point in a cancel safe method.
+consider the effect of stopping execution at every `.await` point in a cancel safe method. Also,
+some methods can't easily be made cancellation safe (e.g, `tokio::sync::mpsc::Sender::send`). 
 
 ## Not polling futures isn't that bad
 It could be argued that it's okay to have futures that are not being polled. However, this brings
@@ -449,12 +452,12 @@ It can be argued that this is the case even if futures are constantly polled. Af
 hard performance guarantees in most rust environments. However, without keeping track of which futures are polled,
 it can be hard to reason about if a particular program will complete or not. This is especially true if futures
 not being polled hold locks. But the same goes for other types of synchronization primitives. For example, a
-future blocking on an mpsc channel send may cause starvation in other parts of the system, and will never
-complete if the future isn't being polled.
+future blocking on an mpsc channel send (because the channel is full) may cause starvation in other parts of the 
+system, and will never complete if the future isn't being polled.
  
 
 
 # Using the aselect library
 
-See [aselect](EXAMPLE.md) for an implementation of the above example code using aselect.
+See [part 2](EXAMPLE.md) for an implementation of the above example code using aselect.
 

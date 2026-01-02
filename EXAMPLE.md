@@ -180,7 +180,7 @@ If the received command i `QueryTemperature`, we set the mutable capture `perfor
 
 This block allows us to receive commands, and update our shared state as a result of those commands.
 Note that the async block created by the `read_command` async method will never be canceled. It thus does not need
-to be cancelation safe.
+to be cancellation safe.
 
 The handler returns `None`. This means that the `aselect!` will continue executing. `aselect!(..).await` 
 does not produce a value until an arm evaluates to `Some`.
