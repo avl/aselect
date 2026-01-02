@@ -1,4 +1,4 @@
-# Using aselect
+# Part 2 - Using aselect
 
 Before reading this, see [part 1](MOTIVATION.md) for a description of the problem being solved.
 
@@ -132,9 +132,9 @@ Here we define `new_power`, `queued_responses` and `perform_measurement` as muta
 variables can be accessed directly from within the setup and handler blocks (which we'll learn more about below).
 
 We define `reader` and `writer` as "borrowed" captures. This means that they can be borrowed by async blocks. This 
-means async blocks that use `reader` and `writer` can capture a reference to these variables in their future.
+means async blocks that use `reader` and `writer` can capture a reference to these variables in their async block.
 If two async blocks try to capture the same variable, only the first one will actually run. The reason for this is
-that mutable references to the same captured variable cannot be held by two different futures, because of rust's
+that mutable references to the same captured variable cannot be held by two different async blocks, because of rust's
 borrow rules.
 
 Now, let's look at the first select arm (commented):
@@ -165,14 +165,13 @@ Now, let's look at the first select arm (commented):
     ),
 ```
 The arm is named `read`, and has three blocks:
- * 
  * setup
  * async
  * handler
 
 The setup is empty. The async block simply calls the async method `read_command`, with the borrowed capture `reader`.
 Every "borrowed" capture must be specified in the argument list to an async block. The same capture can be used in
-multiple blocks, but only the first enabled such future will actually run.
+multiple blocks, but only the first enabled such async block will actually run.
 
 Finally, the result produced by the async code is given to the handler, which acts on the parsed command.
 
@@ -180,8 +179,11 @@ If the received command i `SetPower`, we set the mutable capture `new_power` to 
 If the received command i `QueryTemperature`, we set the mutable capture `perform_measurement` to true.
 
 This block allows us to receive commands, and update our shared state as a result of those commands.
-Note that the future created by the `read_command` async method will never be canceled. It thus does not need
+Note that the async block created by the `read_command` async method will never be canceled. It thus does not need
 to be cancelation safe.
+
+The handler returns `None`. This means that the `aselect!` will continue executing. `aselect!(..).await` 
+does not produce a value until an arm evaluates to `Some`.
 
 The next block is:
 
@@ -232,7 +234,10 @@ The next block is:
 ```
 
 If the option `new_power` holds a value, enable the async block and call `set_heater_power`.
-Do not return a result.
+The `Option::take` method removes the value from the option, meaning that on the next call
+to 'setup' the async arm will be disabled.
+
+This arm never returns a result.
 
 
 ## Measure arm
@@ -257,7 +262,15 @@ Do not return a result.
 ```
 
 If `perform_measurement` is false, disable the async block. Otherwise execute `measure_temperature().await`.
-A response with the produced temperature is added to `queued_responses`.
+A response with the produced temperature is added to `queued_responses`. In this example we
+do not place a limit on the buffer size. To avoid unbounded memory growth, we could either:
+ 
+ * Disable the read arm while the buffer has too many elements (however, this could conceivably 
+   deadlock clients, depending on how they're written).
+ * Throw away alarms while the buffer is full
+ * Only keep the most recent readings
+ * etc
+
 
 ## Alarm arm
 
@@ -281,7 +294,7 @@ Run the `wait_temperature_alarm` method. Whenever it completes, add a queued res
 
 The code presented here has the following guarantees:
 
- * All the futures are always polled
+ * All constructed existing futures are always polled
  * Futures are never canceled unless an error occurs and we exit the loop
 
 It is still relatively convenient and doesn't require any Mutexes, RefCells or other mechanisms to maintain

@@ -1,9 +1,12 @@
-# Async application main loops
+# Part 1 - Async application main loop pitfalls
 
 ## Background
 
-This document takes a look at an async rust application and illustrates a few pitfalls. In part 2,
+This document takes a look at an async rust application and illustrates a few pitfalls. In [part 2](EXAMPLE.md),
 we take a look at how these challenges can be overcome using the "aselect" crate.
+
+This article is intended for developers with some experience of rust async. I know it's a bit long,
+but I'm trying to make sure that I state clearly the problems I'm trying to illustrate.
 
 ## Scenario
 
@@ -11,7 +14,7 @@ Let's say you're writing a server for an embedded system. The system is controll
 protocol built on top of TCP. The hardware has a temperature sensor and a heater. A client should be able
 to read the temperature and control the heater.
 
-Let's start by writing a simple server. We'll assume there's only a single client at a time, for this example.
+Let's start by writing a simple server. We'll assume there's only a single client at a time.
 
 ### A starting point
 
@@ -192,6 +195,7 @@ async fn read_command(reader: &mut tcp::ReadHalf<'_>) -> std::io::Result<Command
         _ => panic!("unexpected command")        
     })
 }
+
 async fn write_response(writer: &mut tcp::WriteHalf<'_>, response: Response) -> std::io::Result<()> {
     match response {
         Response::Temperature(temperature) => {
@@ -201,7 +205,6 @@ async fn write_response(writer: &mut tcp::WriteHalf<'_>, response: Response) -> 
     }
     Ok(())
 }
-
 
 async fn run_server(stream: &mut TcpStream) -> Result<()> {
     let (mut reader, mut writer) = stream.split();
@@ -229,17 +232,18 @@ async fn run_server(stream: &mut TcpStream) -> Result<()> {
 
 Nice! Protocol parsing is no longer intertwined with program logic.
 
-However, the program now contains a pretty severe bug. If the temperature changes while a SetPower command is being
-read, the future returned by `read_command` will be canceled. But it may already have consumed the first byte of
-the 2-byte on-wire packet. In the next iteration of the loop, the 'power' parameter will now be interpreted
-as a new command.
+At first glance, the code looks correct, but it is broken.
+
+If the temperature changes while a SetPower command is being read, the future returned by `read_command` 
+will be canceled. But it may already have consumed the first byte of the 2-byte on-wire packet. 
+In the next iteration of the loop, the 'power' parameter will now be interpreted as a new command.
 
 The cause of this framing error is that `read_command` is not "cancel safe". For an excellent
 article on cancel safety, see: <https://rfd.shared.oxide.computer/rfd/400>.
 
 ### Canceling temperature reading 
 
-Let's continue this slightly contrived journey, and look at the method `wait_temperature_change`.
+Let's continue this slightly contrived journey, and look at the method `wait_temperature_alarm`.
 Imagine that its innards perform hardware operations like this:
 
 ```rust
@@ -247,21 +251,22 @@ use tokio::time::Duration;
 use tokio::time::sleep;
 fn enable_measuring_current() {}
 fn sample_ad_converter() -> u8 {42}
-async fn wait_temperature_change() -> u8 {
+async fn wait_temperature_alarm() -> u8 {
     loop {
+        sleep(Duration::from_millis(1000)).await;
+        
         enable_measuring_current();
         sleep(Duration::from_millis(1)).await;
         let temperature = sample_ad_converter();
         if temperature > 100 {
             return temperature;
         }
-        sleep(Duration::from_millis(1000)).await;
     }
 }
 ```
 
 Imagine this is measuring some very sensitive chemical process, or whatever, sending current through at PT100 
-resistive temperature probe. A precise current is transmitted, and the voltage drop across the actual temperature sensing 
+resistive temperature probe. A precise current is enabled, and the voltage drop across the actual temperature sensing 
 element is measured. However, we only want to enable the current while actually measuring, because the current will 
 make the probe generate heat, affecting the precision of the measurement.
 
@@ -338,7 +343,7 @@ while `write_response` executes.
 
 Now, let's imagine that our hypothetical machine has other features,
 and some of these features interfere with the precise temperature measurement. For this reason, we modify
-`wait_temperature_change` to acquire a lock while performing measurements:
+`wait_temperature_alarm` to acquire a lock while performing measurements:
 
 ```rust
 use tokio::time::{Duration, sleep};
@@ -347,29 +352,29 @@ fn enable_measuring_current() {}
 fn sample_ad_converter() -> u8 {42}
 static PRECISE_MEASUREMENT_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(()); 
 
-async fn wait_temperature_change() -> u8 {
+async fn wait_temperature_alarm() -> u8 {
     loop {
-        enable_measuring_current();
+        sleep(Duration::from_millis(1000)).await;
         {
             let _guard = PRECISE_MEASUREMENT_MUTEX.lock().await;
+            enable_measuring_current();
             sleep(Duration::from_millis(1)).await;
             let temperature = sample_ad_converter();
             if temperature > 100 {
                 return temperature;
             }
         }
-        sleep(Duration::from_millis(1000)).await;
     }
 }
 ```
 
 Imagine that the `measure_temperature` method also acquires `PRECISE_MEASUREMENT_MUTEX`. This will now 
 potentially deadlock the system. Futures that exist but are not being actively polled are hard to reason 
-about. In many other languages, the `wait_temperature_change` method above would be safe against deadlock
+about. In many other languages, the `wait_temperature_alarm` method above would be safe against deadlock
 (unless `sample_ad_converter` also grabs the lock, but if it's a method of some hardware abstraction layer,
 it could be quite easily determined not to).
 
-To be clear, the deadlock can happen because if the future created by `wait_temperature_change` stop being
+To be clear, the deadlock can happen because if the future created by `wait_temperature_alarm` stops being
 polled, it may have executed `PRECISE_MEASUREMENT_MUTEX.lock().await`, but not
 completed `sleep(Duration::from_millis(1)).await;`. Nominally, the sleep returns within 1 ms, plus minus
 some jitter. But if the future isn't polled, even the sleep will never complete.
@@ -390,9 +395,15 @@ shown isn't buggy in itself, it's just not cancellation safe. Determining if a p
 be canceled is not possible with only local information. 
 
 The first and third points above can be viewed as being caused direction by a failure to poll futures
-to completion. 
+to completion.
 
-I'd like to propose the following rule: Futures should always be polled continuously, to completion.
+I'd like to propose the following rule: Futures should always be polled continuously, to completion, except
+in exceptional circumstances, such as when canceled intentionally (e.g timeouts). Some async API:s require 
+canceling futures to implement timeout functionality. The amount of canceling that is needed can be affected 
+by API design. For example, tokio `CancellationToken` can be used to be able to cancel an operation
+without canceling a future.
+
+See part 2 for an implementation using a single task without cancellation.
 
 There's an interesting parallel here to aborting threads. The programming community has long since
 come to the conclusion that the ability to abort threads "from the outside" causes more harm than benefit.
@@ -401,6 +412,24 @@ Rust does not support terminating threads from another thread. Neither does pyth
 For C#, the ability has been deprecated for a long time, see: 
 <https://learn.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/5.0/thread-abort-obsolete>
 Java does not support it: <https://docs.oracle.com/javase/tutorial/essential/concurrency/interrupt.html>
+
+
+## Alternative approaches
+
+There are a few other approaches to solving the specific problem in this example.
+
+## Using separate tasks
+The program could be split into three tasks: A reading task, a writing task and a monitoring task.
+
+Both the reading task and the monitoring task need to be able to communicate with the writing task.
+This would be most conveniently achieved using something like a tokio mpsc channel.
+
+The downside of this approach is some slight performance overhead for the atomic operations
+needed by the channels, and the slight extra complexity from the additional tasks. Such
+an approach also may not always eliminate the problem. For example, in a more complex
+application, the monitoring task may have adjustable parameters, meaning it must again
+be able to receive events from more than one source.
+
 
 # In the real world
 
