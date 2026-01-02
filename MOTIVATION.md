@@ -414,10 +414,6 @@ For C#, the ability has been deprecated for a long time, see:
 Java does not support it: <https://docs.oracle.com/javase/tutorial/essential/concurrency/interrupt.html>
 
 
-## Alternative approaches
-
-There are a few other approaches to solving the specific problem in this example.
-
 ## Using separate tasks
 The program could be split into three tasks: A reading task, a writing task and a monitoring task.
 
@@ -461,21 +457,4 @@ complete if the future isn't being polled.
 # Using the aselect library
 
 See [aselect](EXAMPLE.md) for an implementation of the above example code using aselect.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
