@@ -594,18 +594,24 @@ impl Canceler {
 
     #[doc(hidden)]
     pub fn canceled(&self, i: u32) -> bool {
-        (self.canceled.get() & (1 << i)) != 0
+        // `i` is an arm index. `aselect!` rejects invocations with more than 64 arms
+        // at compile time, so `i < 64` always holds here and the shift cannot overflow.
+        debug_assert!(i < 64);
+        (self.canceled.get() & (1u64 << i)) != 0
     }
 
     /// Cancel the select arm with the given index.
     ///
     /// The first arm has index 0, arms are then numbered consecutively.
+    ///
+    /// # Panics
+    /// Panics if `index >= 64`. (`aselect!` itself does not allow more than 64 arms.)
     pub fn cancel(&self, index: u32) {
         if index >= 64 {
-            panic!("aselect only supports canceling the first 64 arms of a aselect invocation.");
+            panic!("aselect only supports 64 arms per aselect invocation.");
         }
         let val = self.canceled.get();
-        self.canceled.set(val | 1 << index);
+        self.canceled.set(val | (1u64 << index));
     }
 }
 
@@ -770,6 +776,9 @@ impl CancelerWrapper<'_> {
 /// Canceled arms will immediately restart, unless their setup code disables them.
 ///
 /// NOTE! It would be nice if a syntax like `timer1.cancel()` could be used.
+///
+/// # Limits
+/// An `aselect!` invocation supports at most 64 arms; more is a compile error.
 ///
 /// # Cancellation Safety
 /// Dropping the `aselect` object drops all captured variables and any currently executing
@@ -960,9 +969,19 @@ macro_rules! safe_select_impl {
             struct ASelectImpl<'a, TCap:'a, TOut, $($name),*> where
                 $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
             {
-                context: TCap,
+                // Field order matters: the arms hold suspended futures that borrow
+                // `context`, so they must be dropped *before* `context`. Declaring
+                // `context` first would be a use-after-free when a captured value has
+                // a non-trivial `Drop` (or a future holds a `Drop` guard over it).
                 #[allow(unused)]
                 $($name: $name,)*
+                context: TCap,
+                // Set once the state machine has completed: an arm returned
+                // `Output::Terminate` (stream end), or a value was produced while
+                // being used as a `Future`. Guards against re-polling after
+                // completion, which would otherwise re-run setup blocks and build
+                // fresh futures.
+                terminated: bool,
                 phantom: ::core::marker::PhantomData<&'a TOut>,
                 #[allow(unused)]
                 phantom_pinned: ::core::marker::PhantomPinned
@@ -974,10 +993,19 @@ macro_rules! safe_select_impl {
             {
 
                 fn poll_next(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<TOut>> {
+                    self.poll_next_inner(cx, false)
+                }
+
+                fn poll_next_inner(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>, treat_as_future: bool) -> ::core::task::Poll<Option<TOut>> {
                     // SAFETY:
                     // We do not move out of this.
                     let this = unsafe { self.get_unchecked_mut() };
 
+                    // Once terminated, stay terminated. Re-polling must not re-run
+                    // setup blocks or create new futures.
+                    if this.terminated {
+                        return ::core::task::Poll::Ready(None);
+                    }
 
                     const TOTCOUNT: usize = const {
                         let mut totcount = 0;
@@ -988,6 +1016,15 @@ macro_rules! safe_select_impl {
                         )*
                         totcount
                     };
+
+                    // Cancellation is tracked in a `u64` bitmask, one bit per arm, so
+                    // `aselect!` supports at most 64 arms. Reject more at compile time
+                    // (`TOTCOUNT` does not depend on any generic parameter, so this is
+                    // evaluated whenever the macro is expanded).
+                    const _: () = assert!(
+                        TOTCOUNT <= 64,
+                        "aselect! supports at most 64 select arms",
+                    );
 
                     let mut runnable: [bool; TOTCOUNT] = [true; TOTCOUNT];
 
@@ -1006,9 +1043,16 @@ macro_rules! safe_select_impl {
                             if runnable[i] {
                                 match this.$name.do_poll(unsafe{&*cap_ptr}, cx, &mut canceler){
                                     $crate::PollResult::Result(out) => {
+                                        // As a `Future`, producing a value is completion:
+                                        // latch `terminated` so a later poll doesn't
+                                        // re-run setup. As a `Stream`, keep going.
+                                        if treat_as_future {
+                                            this.terminated = true;
+                                        }
                                         return ::core::task::Poll::Ready(Some(out));
                                     }
                                     $crate::PollResult::EndStream => {
+                                        this.terminated = true;
                                         return ::core::task::Poll::Ready(None);
                                     }
                                     $crate::PollResult::Pending(future_created) => {
@@ -1060,7 +1104,7 @@ macro_rules! safe_select_impl {
                 $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
             {
                 fn poll_impl(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<TOut> {
-                    match self.poll_next(cx) {
+                    match self.poll_next_inner(cx, true) {
                         ::core::task::Poll::Ready(Some(val)) => ::core::task::Poll::Ready(val),
                         _ => ::core::task::Poll::Pending,
                     }
@@ -1095,6 +1139,7 @@ macro_rules! safe_select_impl {
             ASelectImpl {
                 phantom_pinned: ::core::marker::PhantomPinned,
                 phantom: ::core::marker::PhantomData,
+                terminated: false,
                 $(
                 #[allow(unused)]
                 $name: $name::new(&context, move|$temp, $canceler: &mut $crate::Canceler| {

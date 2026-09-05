@@ -353,3 +353,75 @@ async fn nested_stream() {
     assert_eq!(outer.next().await.unwrap(), 42u32);
     assert_eq!(outer.next().await.unwrap(), 42u32);
 }
+
+// A drop guard that writes through a `&mut` into a captured value on drop.
+// Regression: `ASelectImpl` must drop its arms (and their suspended futures)
+// before it drops `context`, otherwise this is a use-after-free.
+struct Poker<'a> {
+    who: &'a mut std::string::String,
+}
+impl Drop for Poker<'_> {
+    fn drop(&mut self) {
+        self.who.push_str("-poked");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn drop_order_borrowed_capture_with_drop_guard() {
+    let s = std::string::String::from("hello");
+    let mut fut = std::boxed::Box::pin(aselect!(
+        {
+            borrowed(s);
+        },
+        arm1(
+            {},
+            async |_setup, s| {
+                let _poker = Poker { who: s };
+                std::future::pending::<()>().await;
+            },
+            |r| {
+                let _: () = r;
+                Option::<()>::None
+            }
+        ),
+    ));
+    let mut cx = Context::from_waker(&Waker::noop());
+    let _ = fut.as_mut().poll_next(&mut cx);
+    // Drop while arm1's future is suspended holding a `&mut` into the capture.
+    drop(fut);
+}
+
+// Regression: once a stream terminates it must keep returning `None` and must
+// not re-run setup blocks.
+#[tokio::test(start_paused = true)]
+async fn stream_stays_terminated() {
+    let counter = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let counter_probe = counter.clone();
+    let mut stream = pin!(aselect!(
+        {
+            borrowed(counter);
+        },
+        arm1(
+            {
+                if let Some(c) = &counter {
+                    c.set(c.get() + 1);
+                }
+            },
+            async |_setup| {},
+            |r| {
+                let _: () = r;
+                crate::Output::<()>::Terminate
+            }
+        ),
+    ));
+    assert!(stream.next().await.is_none());
+    let runs_after_terminate = counter_probe.get();
+    assert_eq!(runs_after_terminate, 1);
+    assert!(stream.next().await.is_none());
+    assert!(stream.next().await.is_none());
+    assert_eq!(
+        counter_probe.get(),
+        runs_after_terminate,
+        "setup re-ran after termination"
+    );
+}
