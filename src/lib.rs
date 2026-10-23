@@ -95,6 +95,26 @@ pub trait SelectArm<'a, CTX, TOut> {
     fn cancel(&mut self);
 }
 
+/// Proof that the holder is allowed to invoke `aselect`'s internal macros.
+///
+/// The hidden helper macros that expand to `unsafe` code require a value of this type
+/// as their first argument. It can only be obtained through an `unsafe` block, so
+/// calling those macros from outside `aselect!` requires writing `unsafe { }`, which
+/// is caught by `#![forbid(unsafe_code)]` like any other unsafe block.
+#[doc(hidden)]
+pub struct UnsafeToken(());
+
+impl UnsafeToken {
+    /// # Safety
+    /// Only `aselect!` may create tokens. Passing a token to one of the internal
+    /// macros asserts that the macro's arguments are exactly what `aselect!` would
+    /// pass.
+    #[doc(hidden)]
+    pub unsafe fn new() -> Self {
+        UnsafeToken(())
+    }
+}
+
 /// A wrapper around mutable captured variables
 #[doc(hidden)]
 pub struct MutableCapture<T> {
@@ -414,31 +434,33 @@ impl SafeResult for () {
 }
 
 /// # Safety
-/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
+/// Internal to `aselect!`. The first argument must be an [`UnsafeToken`].
 #[doc(hidden)]
 #[macro_export]
 macro_rules! borrowed_captures0 {
-    (unsafe, $temp: ident, $($cap: ident,)*) => {
+    ($token:expr, $temp: ident, $($cap: ident,)*) => {
+        let _: $crate::UnsafeToken = $token;
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures. Callers must pass the `unsafe` token, so this macro can't
-            // be invoked from safe code by mistake.
+            // than captures. Callers must pass an `UnsafeToken`, which can only be
+            // created in an `unsafe` block.
             let $cap = unsafe { $temp.$cap.borrowed_access()};
         )*
     };
 }
 /// # Safety
-/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
+/// Internal to `aselect!`. The first argument must be an [`UnsafeToken`].
 #[doc(hidden)]
 #[macro_export]
 macro_rules! borrowed_captures1 {
-    (unsafe, $($cap: ident,)*) => {
+    ($token:expr, $($cap: ident,)*) => {
+        let _: $crate::UnsafeToken = $token;
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures. Callers must pass the `unsafe` token, so this macro can't
-            // be invoked from safe code by mistake.
+            // than captures. Callers must pass an `UnsafeToken`, which can only be
+            // created in an `unsafe` block.
             let mut $cap = unsafe { $cap.get() };
         )*
     };
@@ -455,63 +477,67 @@ macro_rules! cancelers {
     };
 }
 /// # Safety
-/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
+/// Internal to `aselect!`. The first argument must be an [`UnsafeToken`].
 #[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures0 {
-    (unsafe, $temp: ident, $($cap: ident,)*) => {
+    ($token:expr, $temp: ident, $($cap: ident,)*) => {
+        let _: $crate::UnsafeToken = $token;
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures. Callers must pass the `unsafe` token, so this macro can't
-            // be invoked from safe code by mistake.
+            // than captures. Callers must pass an `UnsafeToken`, which can only be
+            // created in an `unsafe` block.
             let $cap = unsafe { $temp.$cap.mut_access()};
         )*
     };
 }
 /// # Safety
-/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
+/// Internal to `aselect!`. The first argument must be an [`UnsafeToken`].
 #[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures1 {
-    (unsafe, $($cap: ident,)*) => {
+    ($token:expr, $($cap: ident,)*) => {
+        let _: $crate::UnsafeToken = $token;
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures. Callers must pass the `unsafe` token, so this macro can't
-            // be invoked from safe code by mistake.
+            // than captures. Callers must pass an `UnsafeToken`, which can only be
+            // created in an `unsafe` block.
             let mut $cap = unsafe { $cap.get() };
         )*
     };
 }
 
 /// # Safety
-/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
+/// Internal to `aselect!`. The first argument must be an [`UnsafeToken`].
 #[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures2 {
-    (unsafe, $temp: ident, $($cap: ident,)*) => {
+    ($token:expr, $temp: ident, $($cap: ident,)*) => {
+        let _: $crate::UnsafeToken = $token;
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures. Callers must pass the `unsafe` token, so this macro can't
-            // be invoked from safe code by mistake.
+            // than captures. Callers must pass an `UnsafeToken`, which can only be
+            // created in an `unsafe` block.
             let $cap = unsafe { $temp.$cap.mut_access()};
         )*
     };
 }
 
 /// # Safety
-/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
+/// Internal to `aselect!`. The first argument must be an [`UnsafeToken`].
 #[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures3 {
-    (unsafe, $($cap: ident,)*) => {
+    ($token:expr, $($cap: ident,)*) => {
+        let _: $crate::UnsafeToken = $token;
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures. Callers must pass the `unsafe` token, so this macro can't
-            // be invoked from safe code by mistake.
+            // than captures. Callers must pass an `UnsafeToken`, which can only be
+            // created in an `unsafe` block.
             let mut $cap = unsafe { $cap.get_cell() };
         )*
     };
@@ -880,20 +906,24 @@ macro_rules! aselect {
             |$async_result:ident| $handler: expr
         )$(,)?  )*
     ) => {
-        $crate::safe_select_impl!(unsafe, constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*),$crate::constant_captures1!($($($($const_capture,)*)*)*), $crate::mutable_captures0!(unsafe, temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!(unsafe, $($($($mutable_capture,)*)*)*), $crate::mutable_captures2!(unsafe, temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures3!(unsafe, $($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(unsafe, temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!(unsafe, $($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
+        // SAFETY:
+        // `aselect!` is the only intended creator of `UnsafeToken`s, and passes the
+        // internal macros exactly the arguments they expect.
+        $crate::safe_select_impl!(unsafe { $crate::UnsafeToken::new() }, constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*),$crate::constant_captures1!($($($($const_capture,)*)*)*), $crate::mutable_captures0!(unsafe { $crate::UnsafeToken::new() }, temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!(unsafe { $crate::UnsafeToken::new() }, $($($($mutable_capture,)*)*)*), $crate::mutable_captures2!(unsafe { $crate::UnsafeToken::new() }, temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures3!(unsafe { $crate::UnsafeToken::new() }, $($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(unsafe { $crate::UnsafeToken::new() }, temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!(unsafe { $crate::UnsafeToken::new() }, $($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
     };
 }
 
 /// # Safety
-/// Internal to `aselect!`. Invocations must start with the `unsafe` token, since the
+/// Internal to `aselect!`. The first argument must be an [`UnsafeToken`], since the
 /// expansion contains `unsafe` blocks whose soundness depends on the arguments
 /// being exactly what `aselect!` passes.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! safe_select_impl {
-    (unsafe, constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($borrowed_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$mutable_captures3: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
+    ($token:expr, constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($borrowed_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$mutable_captures3: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
 
         {
+            let _: $crate::UnsafeToken = $token;
             // Soundness relies on user code never being able to name or reach the
             // generated types below (or their fields): a hand-built `ASelectImpl` or
             // arm could be polled unpinned, or have its future moved out, and the
@@ -1281,13 +1311,37 @@ pub mod patterns {}
 /// let _s = aselect!({}, arm({ let _ = arm::new; }, async |_x| {}, |_r| Some(())),);
 /// ```
 ///
-/// Hidden helper macros whose expansion contains `unsafe` blocks must require the
-/// caller to write `unsafe` (otherwise they could alias captures from safe code):
-/// ```compile_fail
+/// Hidden helper macros whose expansion contains `unsafe` blocks must require an
+/// `UnsafeToken` (otherwise they could alias captures from safe code):
+/// ```compile_fail,E0308
 /// use aselect::MutableCapture;
 /// struct Holder { c: MutableCapture<u64> }
 /// let temp = Holder { c: MutableCapture::new(0) };
-/// aselect::mutable_captures0!(temp, c,);
+/// aselect::mutable_captures0!((), temp, c,);
+/// ```
+/// ```compile_fail,E0133
+/// let _ = aselect::UnsafeToken::new();
+/// ```
+/// ```compile_fail
+/// let _ = aselect::UnsafeToken(());
+/// ```
+/// Using an internal macro requires an `unsafe` block in user code, which
+/// `forbid(unsafe_code)` rejects, while `aselect!` itself remains usable:
+/// ```compile_fail
+/// #![forbid(unsafe_code)]
+/// use aselect::MutableCapture;
+/// struct Holder { c: MutableCapture<u64> }
+/// let temp = Holder { c: MutableCapture::new(0) };
+/// aselect::mutable_captures0!(unsafe { aselect::UnsafeToken::new() }, temp, c,);
+/// ```
+/// ```
+/// #![forbid(unsafe_code)]
+/// use aselect::aselect;
+/// let (c, b, m) = (1u8, 2u8, 3u8);
+/// let _s = aselect!(
+///     { constant(c); borrowed(b); mutable(m); },
+///     arm({ *m += *c; }, async |_x, b| { *b += 1; m.with(|m| *m += 1) }, |_r| Some(())),
+/// );
 /// ```
 ///
 /// User types must not be shadowed by generated types inside the arms:
