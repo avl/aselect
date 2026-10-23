@@ -413,30 +413,32 @@ impl SafeResult for () {
     }
 }
 
+/// # Safety
+/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! borrowed_captures0 {
-    ( $temp: ident, $($cap: ident,)*) => {
+    (unsafe, $temp: ident, $($cap: ident,)*) => {
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures.
-            // From safety perspective, we do not protect against users calling this
-            // hidden macro manually.
+            // than captures. Callers must pass the `unsafe` token, so this macro can't
+            // be invoked from safe code by mistake.
             let $cap = unsafe { $temp.$cap.borrowed_access()};
         )*
     };
 }
+/// # Safety
+/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! borrowed_captures1 {
-    ( $($cap: ident,)*) => {
+    (unsafe, $($cap: ident,)*) => {
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures.
-            // From safety perspective, we do not protect against users calling this
-            // hidden macro manually.
+            // than captures. Callers must pass the `unsafe` token, so this macro can't
+            // be invoked from safe code by mistake.
             let mut $cap = unsafe { $cap.get() };
         )*
     };
@@ -447,65 +449,69 @@ macro_rules! cancelers {
     ( $canceler: ident, $($arm_name: ident,)*) => {
         let mut i = 0;
         $(
-            // SAFETY:
-            // Only called from inside `aselect`-macro, in closures that live shorter
-            // than canceler.
-            // From safety perspective, we do not protect against users calling this
-            // hidden macro manually.
             let mut $arm_name = $crate::CancelerWrapper::new($canceler, i);
             i+=1;
         )*
     };
 }
+/// # Safety
+/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures0 {
-    ( $temp: ident, $($cap: ident,)*) => {
+    (unsafe, $temp: ident, $($cap: ident,)*) => {
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures.
-            // From safety perspective, we do not protect against users calling this
-            // hidden macro manually.
+            // than captures. Callers must pass the `unsafe` token, so this macro can't
+            // be invoked from safe code by mistake.
             let $cap = unsafe { $temp.$cap.mut_access()};
         )*
     };
 }
+/// # Safety
+/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures1 {
-    ( $($cap: ident,)*) => {
+    (unsafe, $($cap: ident,)*) => {
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures.
-            // From safety perspective, we do not protect against users calling this
-            // hidden macro manually.
+            // than captures. Callers must pass the `unsafe` token, so this macro can't
+            // be invoked from safe code by mistake.
             let mut $cap = unsafe { $cap.get() };
         )*
     };
 }
 
+/// # Safety
+/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures2 {
-    ( $temp: ident, $($cap: ident,)*) => {
+    (unsafe, $temp: ident, $($cap: ident,)*) => {
         $(
+            // SAFETY:
+            // Only called from inside `aselect`-macro, in closures that live shorter
+            // than captures. Callers must pass the `unsafe` token, so this macro can't
+            // be invoked from safe code by mistake.
             let $cap = unsafe { $temp.$cap.mut_access()};
         )*
     };
 }
 
+/// # Safety
+/// Internal to `aselect!`. Invocations must start with the `unsafe` token.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! mutable_captures3 {
-    ( $($cap: ident,)*) => {
+    (unsafe, $($cap: ident,)*) => {
         $(
             // SAFETY:
             // Only called from inside `aselect`-macro, in closures that live shorter
-            // than captures.
-            // From safety perspective, we do not protect against users calling this
-            // hidden macro manually.
+            // than captures. Callers must pass the `unsafe` token, so this macro can't
+            // be invoked from safe code by mistake.
             let mut $cap = unsafe { $cap.get_cell() };
         )*
     };
@@ -553,6 +559,24 @@ macro_rules! define_stream_impl {
                 }
             }
 
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+#[cfg(feature = "futures")]
+macro_rules! opaque_type {
+    ($out:ident, $lt:lifetime, $($p:ident),*) => {
+        impl ::core::future::Future<Output = $out> + $crate::Stream<Item = $out> + use<$lt, $out, $($p),*>
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+#[cfg(not(feature = "futures"))]
+macro_rules! opaque_type {
+    ($out:ident, $lt:lifetime, $($p:ident),*) => {
+        impl ::core::future::Future<Output = $out> + use<$lt, $out, $($p),*>
     };
 }
 
@@ -856,293 +880,328 @@ macro_rules! aselect {
             |$async_result:ident| $handler: expr
         )$(,)?  )*
     ) => {
-        $crate::safe_select_impl!(constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*),$crate::constant_captures1!($($($($const_capture,)*)*)*), $crate::mutable_captures0!(temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!($($($($mutable_capture,)*)*)*), $crate::mutable_captures2!(temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures3!($($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!($($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
+        $crate::safe_select_impl!(unsafe, constant($($($($const_capture,)*)*)*), mutable($($($($mutable_capture,)*)*)*), borrowed($($($($borrowed_capture,)*)*)*), temp, canceler, $crate::cancelers!(canceler, $($arm_name,)*), $crate::constant_captures0!(temp, $($($($const_capture,)*)*)*),$crate::constant_captures1!($($($($const_capture,)*)*)*), $crate::mutable_captures0!(unsafe, temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures1!(unsafe, $($($($mutable_capture,)*)*)*), $crate::mutable_captures2!(unsafe, temp, $($($($mutable_capture,)*)*)*), $crate::mutable_captures3!(unsafe, $($($($mutable_capture,)*)*)*), $crate::borrowed_captures0!(unsafe, temp, $($($($borrowed_capture,)*)*)*), $crate::borrowed_captures1!(unsafe, $($($($borrowed_capture,)*)*)*), $($arm_name  ( $setup , async |$async_input $(,$borrow)*| $async_block, |$async_result| $handler), )*)
     };
 }
 
+/// # Safety
+/// Internal to `aselect!`. Invocations must start with the `unsafe` token, since the
+/// expansion contains `unsafe` blocks whose soundness depends on the arguments
+/// being exactly what `aselect!` passes.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! safe_select_impl {
-    ( constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($borrowed_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$mutable_captures3: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
+    (unsafe, constant($($const_cap:ident,)*), mutable($($mutable_cap:ident,)*), borrowed($($borrowed_cap:ident,)*), $temp: ident, $canceler: ident, $cancelers: stmt, $const_captures0:stmt, $const_captures1:stmt, $mutable_captures0: stmt, $mutable_captures1: stmt, $mutable_captures2: stmt,$mutable_captures3: stmt,$excl_captures0: stmt, $excl_captures1: stmt,$( $name: ident  ( $body0: expr, async |$fut_input:ident $(,$cap1:ident)*| $body1: expr, |$result:ident| $handler_body: expr),  )* ) => {
 
         {
-            #[allow(nonstandard_style)]
-            #[allow(unused)]
-            struct Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$borrowed_cap)*> {
-                phantom: ::core::marker::PhantomData<&'a()>,
-                $($borrowed_cap: $crate::BorrowedCapture<$borrowed_cap>, )*
-                $($mutable_cap: $crate::MutableCapture<$mutable_cap>, )*
-                $($const_cap: $const_cap, )*
-            }
-
-            let context = Context {
-                phantom: ::core::marker::PhantomData,
-                $($borrowed_cap: $crate::BorrowedCapture::new($borrowed_cap), )*
-                $($mutable_cap:$crate::MutableCapture::new($mutable_cap),)*
-                $($const_cap: $const_cap, )*
-            };
-
-            $(
+            // Soundness relies on user code never being able to name or reach the
+            // generated types below (or their fields): a hand-built `ASelectImpl` or
+            // arm could be polled unpinned, or have its future moved out, and the
+            // unconstrained `'a` handed to arm closures could be smuggled out.
+            //
+            // Two things ensure this:
+            //  * All generated items live in inner blocks that contain no user code.
+            //    User code (setup, async and handler blocks) is placed in closures
+            //    *outside* those blocks, so the item names are not in scope there.
+            //    (Blocks do not give field privacy, only name scoping.)
+            //  * The finished state machine is returned as an opaque `impl Future`,
+            //    so its fields can't be accessed by the caller.
+            let (context, make) = {
                 #[allow(nonstandard_style)]
                 #[allow(unused)]
-                struct $name<'a, R, TOut, TCap:'a, TFun, TDecide> where
-                    TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
-                    R: ::core::future::Future+'a,
-                    TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<$crate::Output<TOut>>,
-
-                {
-                    fun: TFun,
-                    fut: Option<R>,
-                    decide: TDecide,
-                    phantom_cap: ::core::marker::PhantomData<&'a TCap>,
+                struct Context<'a $(,$const_cap)* $(,$mutable_cap)* $(,$borrowed_cap)*> {
+                    phantom: ::core::marker::PhantomData<&'a()>,
+                    $($borrowed_cap: $crate::BorrowedCapture<$borrowed_cap>, )*
+                    $($mutable_cap: $crate::MutableCapture<$mutable_cap>, )*
+                    $($const_cap: $const_cap, )*
                 }
 
                 #[allow(nonstandard_style)]
-                impl<'a, R, TOut, TCap:'a, TFun,TDecide> $name<'a, R, TOut, TCap, TFun, TDecide> where
-                    TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
-                    R: ::core::future::Future+'a,
-                    TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<$crate::Output<TOut>>,
+                #[allow(unused)]
+                struct ASelectImpl<'a, TCap:'a, TOut, $($name),*> where
+                    $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
                 {
-                    fn new(_context_hint: &TCap, fun: TFun, decide: TDecide) -> Self {
-                        Self {
-                            fun,
-                            decide,
-                            fut: None,
-                            phantom_cap: ::core::marker::PhantomData,
-                        }
-                    }
-
+                    // Field order matters: the arms hold suspended futures that borrow
+                    // `context`, so they must be dropped *before* `context`. Declaring
+                    // `context` first would be a use-after-free when a captured value has
+                    // a non-trivial `Drop` (or a future holds a `Drop` guard over it).
+                    #[allow(unused)]
+                    $($name: $name,)*
+                    context: TCap,
+                    // Set once the state machine has completed: an arm returned
+                    // `Output::Terminate` (stream end), or a value was produced while
+                    // being used as a `Future`. Guards against re-polling after
+                    // completion, which would otherwise re-run setup blocks and build
+                    // fresh futures.
+                    terminated: bool,
+                    phantom: ::core::marker::PhantomData<&'a TOut>,
+                    #[allow(unused)]
+                    phantom_pinned: ::core::marker::PhantomPinned
                 }
-                /// Return Some if future was ready (and thus must be recreated before next iteration)
-                /// Return Some(Some(_)) if it also produced a value
+
                 #[allow(nonstandard_style)]
-                impl<'a, R, TOut, TCap:'a, TFun,TDecide> $crate::SelectArm<'a, TCap, TOut> for $name<'a, R, TOut, TCap, TFun, TDecide> where
-                    TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
-                    R: ::core::future::Future+'a,
-                    TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<$crate::Output<TOut>>,
+                impl<'a, TCap, TOut, $($name),*> ASelectImpl<'a, TCap, TOut,  $($name),*> where
+                    $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
                 {
 
-                    fn cancel(&mut self) {
-                        self.fut = None;
+                    fn poll_next(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<TOut>> {
+                        self.poll_next_inner(cx, false)
                     }
 
-                    fn do_poll(&mut self, ctx: &'a TCap, cx: &mut ::core::task::Context<'_>, canceler: &mut $crate::Canceler) -> $crate::PollResult<TOut> {
-                        let mut future_created = false;
-                        if self.fut.is_none() {
-                            if let Some(fut) = (self.fun)(ctx, canceler) {
-                                self.fut = Some(fut);
-                                future_created = true;
-                            } else {
-                                return $crate::PollResult::Disabled;
-                            }
-                        }
-
-                        let fut = self.fut.as_mut().unwrap();
+                    fn poll_next_inner(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>, treat_as_future: bool) -> ::core::task::Poll<Option<TOut>> {
                         // SAFETY:
-                        // `do_poll` is not public. `Self` is in fact always pinned.
-                        match unsafe { ::core::pin::Pin::new_unchecked(fut) }.poll(cx) {
-                            ::core::task::Poll::Ready(out) => {
-                                self.fut = None;
-                                match (self.decide)(ctx, out, canceler) {
-                                    Some($crate::Output::Value(c)) => {
-                                        return $crate::PollResult::Result(c);
-                                    }
-                                    Some($crate::Output::Terminate) => {
-                                        return $crate::PollResult::EndStream;
-                                    }
-                                    _ => {
-                                        return $crate::PollResult::Inhibited;
-                                    }
-                                }
-                            }
-                            ::core::task::Poll::Pending => {
-                                return $crate::PollResult::Pending(future_created);
-                            },
+                        // We do not move out of this.
+                        let this = unsafe { self.get_unchecked_mut() };
+
+                        // Once terminated, stay terminated. Re-polling must not re-run
+                        // setup blocks or create new futures.
+                        if this.terminated {
+                            return ::core::task::Poll::Ready(None);
                         }
 
-                    }
-                }
-            )*
+                        const TOTCOUNT: usize = const {
+                            let mut totcount = 0;
+                            $(
+                                #[allow(unused)]
+                                let $name = ();
+                                totcount += 1;
+                            )*
+                            totcount
+                        };
 
-            #[allow(nonstandard_style)]
-            #[allow(unused)]
-            struct ASelectImpl<'a, TCap:'a, TOut, $($name),*> where
-                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
-            {
-                // Field order matters: the arms hold suspended futures that borrow
-                // `context`, so they must be dropped *before* `context`. Declaring
-                // `context` first would be a use-after-free when a captured value has
-                // a non-trivial `Drop` (or a future holds a `Drop` guard over it).
-                #[allow(unused)]
-                $($name: $name,)*
-                context: TCap,
-                // Set once the state machine has completed: an arm returned
-                // `Output::Terminate` (stream end), or a value was produced while
-                // being used as a `Future`. Guards against re-polling after
-                // completion, which would otherwise re-run setup blocks and build
-                // fresh futures.
-                terminated: bool,
-                phantom: ::core::marker::PhantomData<&'a TOut>,
-                #[allow(unused)]
-                phantom_pinned: ::core::marker::PhantomPinned
-            }
+                        // Cancellation is tracked in a `u64` bitmask, one bit per arm, so
+                        // `aselect!` supports at most 64 arms. Reject more at compile time
+                        // (`TOTCOUNT` does not depend on any generic parameter, so this is
+                        // evaluated whenever the macro is expanded).
+                        const _: () = assert!(
+                            TOTCOUNT <= 64,
+                            "aselect! supports at most 64 select arms",
+                        );
 
-            #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> ASelectImpl<'a, TCap, TOut,  $($name),*> where
-                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
-            {
+                        let mut runnable: [bool; TOTCOUNT] = [true; TOTCOUNT];
 
-                fn poll_next(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<TOut>> {
-                    self.poll_next_inner(cx, false)
-                }
-
-                fn poll_next_inner(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>, treat_as_future: bool) -> ::core::task::Poll<Option<TOut>> {
-                    // SAFETY:
-                    // We do not move out of this.
-                    let this = unsafe { self.get_unchecked_mut() };
-
-                    // Once terminated, stay terminated. Re-polling must not re-run
-                    // setup blocks or create new futures.
-                    if this.terminated {
-                        return ::core::task::Poll::Ready(None);
-                    }
-
-                    const TOTCOUNT: usize = const {
-                        let mut totcount = 0;
-                        $(
-                            #[allow(unused)]
-                            let $name = ();
-                            totcount += 1;
-                        )*
-                        totcount
-                    };
-
-                    // Cancellation is tracked in a `u64` bitmask, one bit per arm, so
-                    // `aselect!` supports at most 64 arms. Reject more at compile time
-                    // (`TOTCOUNT` does not depend on any generic parameter, so this is
-                    // evaluated whenever the macro is expanded).
-                    const _: () = assert!(
-                        TOTCOUNT <= 64,
-                        "aselect! supports at most 64 select arms",
-                    );
-
-                    let mut runnable: [bool; TOTCOUNT] = [true; TOTCOUNT];
-
-                    let cap_ptr = (&this.context) as *const _;
-                    let mut iteration_count = 0;
-                    #[allow(unused_assignments)]
-                    loop {
-                        // True if all arms are okay with yielding. I.e, thy haven't just
-                        // returned pending (in which case other arms may have to be polled),
-                        // or returned "inhibited" (in which case they themselves must be
-                        // polled again).
-                        let mut can_yield = true;
-                        let mut i = 0;
-                        let mut canceler = $crate::Canceler::new();
-                        $(
-                            if runnable[i] {
-                                match this.$name.do_poll(unsafe{&*cap_ptr}, cx, &mut canceler){
-                                    $crate::PollResult::Result(out) => {
-                                        // As a `Future`, producing a value is completion:
-                                        // latch `terminated` so a later poll doesn't
-                                        // re-run setup. As a `Stream`, keep going.
-                                        if treat_as_future {
-                                            this.terminated = true;
+                        let cap_ptr = (&this.context) as *const _;
+                        let mut iteration_count = 0;
+                        #[allow(unused_assignments)]
+                        loop {
+                            // True if all arms are okay with yielding. I.e, thy haven't just
+                            // returned pending (in which case other arms may have to be polled),
+                            // or returned "inhibited" (in which case they themselves must be
+                            // polled again).
+                            let mut can_yield = true;
+                            let mut i = 0;
+                            let mut canceler = $crate::Canceler::new();
+                            $(
+                                if runnable[i] {
+                                    match this.$name.do_poll(unsafe{&*cap_ptr}, cx, &mut canceler){
+                                        $crate::PollResult::Result(out) => {
+                                            // As a `Future`, producing a value is completion:
+                                            // latch `terminated` so a later poll doesn't
+                                            // re-run setup. As a `Stream`, keep going.
+                                            if treat_as_future {
+                                                this.terminated = true;
+                                            }
+                                            return ::core::task::Poll::Ready(Some(out));
                                         }
-                                        return ::core::task::Poll::Ready(Some(out));
-                                    }
-                                    $crate::PollResult::EndStream => {
-                                        this.terminated = true;
-                                        return ::core::task::Poll::Ready(None);
-                                    }
-                                    $crate::PollResult::Pending(future_created) => {
-                                        if future_created {
+                                        $crate::PollResult::EndStream => {
+                                            this.terminated = true;
+                                            return ::core::task::Poll::Ready(None);
+                                        }
+                                        $crate::PollResult::Pending(future_created) => {
+                                            if future_created {
+                                                can_yield = false;
+                                            }
+                                            runnable[i] = false;
+                                        }
+                                        $crate::PollResult::Disabled => {
+                                        }
+                                        $crate::PollResult::Inhibited => {
                                             can_yield = false;
                                         }
-                                        runnable[i] = false;
                                     }
-                                    $crate::PollResult::Disabled => {
-                                    }
-                                    $crate::PollResult::Inhibited => {
-                                        can_yield = false;
-                                    }
-                                }
-                            }
-                            i += 1;
-                        )*
-                        // SAFETY:
-                        // Only a single thread executes poll on this future. This is guaranteed
-                        // because we take the future by `Pin<&mut Self`
-                        if canceler.any() {
-                            can_yield = false;
-                            let mut i = 0;
-                            $(
-                                // SAFETY:
-                                // Only a single thread executes poll on this future. This is guaranteed
-                                // because we take the future by `Pin<&mut Self`
-                                if canceler.canceled(i as u32) {
-                                    this.$name.cancel();
-                                    runnable[i] = true;
                                 }
                                 i += 1;
                             )*
-                        }
-                        iteration_count += 1;
-                        if can_yield {
-                            return ::core::task::Poll::Pending;
-                        }
-                        if iteration_count > 10 {
-                            cx.waker().wake_by_ref();
-                            return ::core::task::Poll::Pending;
+                            // SAFETY:
+                            // Only a single thread executes poll on this future. This is guaranteed
+                            // because we take the future by `Pin<&mut Self`
+                            if canceler.any() {
+                                can_yield = false;
+                                let mut i = 0;
+                                $(
+                                    // SAFETY:
+                                    // Only a single thread executes poll on this future. This is guaranteed
+                                    // because we take the future by `Pin<&mut Self`
+                                    if canceler.canceled(i as u32) {
+                                        this.$name.cancel();
+                                        runnable[i] = true;
+                                    }
+                                    i += 1;
+                                )*
+                            }
+                            iteration_count += 1;
+                            if can_yield {
+                                return ::core::task::Poll::Pending;
+                            }
+                            if iteration_count > 10 {
+                                cx.waker().wake_by_ref();
+                                return ::core::task::Poll::Pending;
+                            }
                         }
                     }
                 }
-            }
 
-            #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> ASelectImpl<'a, TCap, TOut,  $($name),*> where
-                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
-            {
-                fn poll_impl(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<TOut> {
-                    match self.poll_next_inner(cx, true) {
-                        ::core::task::Poll::Ready(Some(val)) => ::core::task::Poll::Ready(val),
-                        _ => ::core::task::Poll::Pending,
+                #[allow(nonstandard_style)]
+                impl<'a, TCap, TOut, $($name),*> ASelectImpl<'a, TCap, TOut,  $($name),*> where
+                    $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
+                {
+                    fn poll_impl(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<TOut> {
+                        match self.poll_next_inner(cx, true) {
+                            ::core::task::Poll::Ready(Some(val)) => ::core::task::Poll::Ready(val),
+                            _ => ::core::task::Poll::Pending,
+                        }
                     }
                 }
-            }
 
-            #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> ASelectImpl<'a, TCap, TOut,  $($name),*> where
-                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
-            {
-                fn poll_stream_impl(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<TOut>> {
-                    match self.poll_next(cx) {
-                        ::core::task::Poll::Ready(val) => ::core::task::Poll::Ready(val),
-                        _ => ::core::task::Poll::Pending,
+                #[allow(nonstandard_style)]
+                impl<'a, TCap, TOut, $($name),*> ASelectImpl<'a, TCap, TOut,  $($name),*> where
+                    $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
+                {
+                    fn poll_stream_impl(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Option<TOut>> {
+                        match self.poll_next(cx) {
+                            ::core::task::Poll::Ready(val) => ::core::task::Poll::Ready(val),
+                            _ => ::core::task::Poll::Pending,
+                        }
                     }
                 }
-            }
 
-            $crate::define_stream_impl!($($name),*);
+                $crate::define_stream_impl!($($name),*);
 
-            #[allow(nonstandard_style)]
-            impl<'a, TCap, TOut, $($name),*> ::core::future::Future for ASelectImpl<'a, TCap, TOut, $($name),*> where
-                $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
-            {
-                type Output = TOut;
-                fn poll(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
-                    self.poll_impl(cx)
+                #[allow(nonstandard_style)]
+                impl<'a, TCap, TOut, $($name),*> ::core::future::Future for ASelectImpl<'a, TCap, TOut, $($name),*> where
+                    $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
+                {
+                    type Output = TOut;
+                    fn poll(self: ::core::pin::Pin<&mut Self>, cx: &mut ::core::task::Context<'_>) -> ::core::task::Poll<Self::Output> {
+                        self.poll_impl(cx)
+                    }
                 }
-            }
 
 
-            ASelectImpl {
-                phantom_pinned: ::core::marker::PhantomPinned,
-                phantom: ::core::marker::PhantomData,
-                terminated: false,
+                #[allow(nonstandard_style)]
+                fn make<'a, TCap: 'a, TOut: 'a, $($name),*>($($name: $name,)* context: TCap) -> $crate::opaque_type!(TOut, 'a, TCap, $($name),*)
+                where
+                    $($name: $crate::SelectArm<'a, TCap, TOut> ,)*
+                {
+                    ASelectImpl {
+                        phantom_pinned: ::core::marker::PhantomPinned,
+                        phantom: ::core::marker::PhantomData,
+                        terminated: false,
+                        $($name,)*
+                        context,
+                    }
+                }
+
+                (
+                    Context {
+                        phantom: ::core::marker::PhantomData,
+                        $($borrowed_cap: $crate::BorrowedCapture::new($borrowed_cap), )*
+                        $($mutable_cap:$crate::MutableCapture::new($mutable_cap),)*
+                        $($const_cap: $const_cap, )*
+                    },
+                    make,
+                )
+            };
+
+            #[allow(unused)]
+            make(
                 $(
-                #[allow(unused)]
-                $name: $name::new(&context, move|$temp, $canceler: &mut $crate::Canceler| {
+                    // Each arm type is defined in its own block, so that the user
+                    // closures passed to its constructor can't name it.
+                    ({
+                        #[allow(nonstandard_style)]
+                        #[allow(unused)]
+                        struct $name<'a, R, TOut, TCap:'a, TFun, TDecide> where
+                            TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
+                            R: ::core::future::Future+'a,
+                            TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<$crate::Output<TOut>>,
+
+                        {
+                            fun: TFun,
+                            fut: Option<R>,
+                            decide: TDecide,
+                            phantom_cap: ::core::marker::PhantomData<&'a TCap>,
+                        }
+
+                        #[allow(nonstandard_style)]
+                        impl<'a, R, TOut, TCap:'a, TFun,TDecide> $name<'a, R, TOut, TCap, TFun, TDecide> where
+                            TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
+                            R: ::core::future::Future+'a,
+                            TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<$crate::Output<TOut>>,
+                        {
+                            fn new(_context_hint: &TCap, fun: TFun, decide: TDecide) -> Self {
+                                Self {
+                                    fun,
+                                    decide,
+                                    fut: None,
+                                    phantom_cap: ::core::marker::PhantomData,
+                                }
+                            }
+
+                        }
+                        /// Return Some if future was ready (and thus must be recreated before next iteration)
+                        /// Return Some(Some(_)) if it also produced a value
+                        #[allow(nonstandard_style)]
+                        impl<'a, R, TOut, TCap:'a, TFun,TDecide> $crate::SelectArm<'a, TCap, TOut> for $name<'a, R, TOut, TCap, TFun, TDecide> where
+                            TFun: FnMut(&'a TCap, &mut $crate::Canceler) -> Option<R>,
+                            R: ::core::future::Future+'a,
+                            TDecide: FnMut(&'a TCap, R::Output, &mut $crate::Canceler) -> Option<$crate::Output<TOut>>,
+                        {
+
+                            fn cancel(&mut self) {
+                                self.fut = None;
+                            }
+
+                            fn do_poll(&mut self, ctx: &'a TCap, cx: &mut ::core::task::Context<'_>, canceler: &mut $crate::Canceler) -> $crate::PollResult<TOut> {
+                                let mut future_created = false;
+                                if self.fut.is_none() {
+                                    if let Some(fut) = (self.fun)(ctx, canceler) {
+                                        self.fut = Some(fut);
+                                        future_created = true;
+                                    } else {
+                                        return $crate::PollResult::Disabled;
+                                    }
+                                }
+
+                                let fut = self.fut.as_mut().unwrap();
+                                // SAFETY:
+                                // `do_poll` is only called by `ASelectImpl::poll_next_inner` on its own
+                                // (pinned) fields. User code cannot call it: the arm type is not
+                                // nameable from user code, and the `ASelectImpl` holding it is opaque.
+                                match unsafe { ::core::pin::Pin::new_unchecked(fut) }.poll(cx) {
+                                    ::core::task::Poll::Ready(out) => {
+                                        self.fut = None;
+                                        match (self.decide)(ctx, out, canceler) {
+                                            Some($crate::Output::Value(c)) => {
+                                                return $crate::PollResult::Result(c);
+                                            }
+                                            Some($crate::Output::Terminate) => {
+                                                return $crate::PollResult::EndStream;
+                                            }
+                                            _ => {
+                                                return $crate::PollResult::Inhibited;
+                                            }
+                                        }
+                                    }
+                                    ::core::task::Poll::Pending => {
+                                        return $crate::PollResult::Pending(future_created);
+                                    },
+                                }
+
+                            }
+                        }
+                        $name::new
+                    })(&context, move|$temp, $canceler: &mut $crate::Canceler| {
                         $cancelers
                         $const_captures0
                         $const_captures1
@@ -1185,13 +1244,57 @@ macro_rules! safe_select_impl {
                             let t = Some($handler_body);
                             $crate::result(t)
                         },
-                ),
+                    ),
                 )*
                 context,
-            }
+            )
         }
     }
 }
 
 #[doc = include_str!("../MOTIVATION.md")]
 pub mod patterns {}
+
+/// Compile-fail regression tests for soundness holes that were once present.
+///
+/// The fields of the `aselect!` object must not be reachable (otherwise an arm's
+/// future could be polled unpinned, and then moved):
+/// ```compile_fail,E0609
+/// use aselect::aselect;
+/// let s = aselect!({}, arm({}, async |_x| {}, |_r| Some(())),);
+/// let _ = &s.arm;
+/// ```
+/// ```compile_fail,E0609
+/// use aselect::aselect;
+/// let s = aselect!({}, arm({}, async |_x| {}, |_r| Some(())),);
+/// let _ = &s.context;
+/// ```
+///
+/// The generated types must not be nameable from user code inside the arms
+/// (otherwise a state machine with an unconstrained lifetime could be built by hand):
+/// ```compile_fail,E0422
+/// use aselect::aselect;
+/// let _s = aselect!({}, arm({ let _ = ASelectImpl { terminated: false }; }, async |_x| {}, |_r| Some(())),);
+/// ```
+/// ```compile_fail,E0433
+/// use aselect::aselect;
+/// let _s = aselect!({}, arm({ let _ = arm::new; }, async |_x| {}, |_r| Some(())),);
+/// ```
+///
+/// Hidden helper macros whose expansion contains `unsafe` blocks must require the
+/// caller to write `unsafe` (otherwise they could alias captures from safe code):
+/// ```compile_fail
+/// use aselect::MutableCapture;
+/// struct Holder { c: MutableCapture<u64> }
+/// let temp = Holder { c: MutableCapture::new(0) };
+/// aselect::mutable_captures0!(temp, c,);
+/// ```
+///
+/// User types must not be shadowed by generated types inside the arms:
+/// ```
+/// use aselect::aselect;
+/// use core::task::{Context, Waker};
+/// let _s = aselect!({}, arm({ let _cx = Context::from_waker(Waker::noop()); }, async |_x| {}, |_r| Some(())),);
+/// ```
+#[doc(hidden)]
+pub mod soundness_tests {}
